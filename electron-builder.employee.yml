@@ -1,0 +1,51 @@
+﻿appId: com.kuai.z
+productName: kuai-z
+npmRebuild: false
+afterPack: ./set-icon-emp.js
+extraMetadata:
+  name: whatsapp-account-manager-employee
+directories:
+  output: dist_electron/emp3
+files:
+  - dist/**/*
+  - resources/**/*
+  - '!node_modules/echarts/**'
+  - '!node_modules/zrender/**'
+  - '!node_modules/flag-icons/**'
+  - '!node_modules/@aws-sdk/**'
+  - '!node_modules/@smithy/**'
+  - '!node_modules/electron-updater/**'
+  - '!node_modules/lodash/**'
+  - '!node_modules/pngjs/**'
+  - '!node_modules/js-yaml/**'
+  - '!node_modules/@tootallnate/**'
+  - '!node_modules/path-scurry/**'
+  - '!node_modules/bare-url/**'
+  - '!node_modules/bare-fs/**'
+  - '!node_modules/@electron/asar/**'
+  - '!node_modules/@electron/get/**'
+asar: true
+electronLanguages:
+  - zh-CN
+  - en-US
+asarUnpack:
+  - node_modules/better-sqlite3/**/*
+  - node_modules/whatsapp-web.js/**/*
+  - node_modules/@whiskeysockets/**/*
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/employee-icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: kuai-z
+
+
+
+
+
+

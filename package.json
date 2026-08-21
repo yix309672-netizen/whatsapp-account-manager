@@ -1,0 +1,83 @@
+{
+  "name": "whatsapp-account-manager",
+  "version": "2.5.0",
+  "description": "WhatsApp 多账号管理器 - 基于 Electron + React + whatsapp-web.js",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build && electron-builder",
+    "build:central": "electron-vite build && node scripts/obfuscate.js && electron-builder --config electron-builder.central.yml",
+    "build:employee": "electron-vite build && node scripts/obfuscate.js && electron-builder --config electron-builder.employee.yml",
+    "preview": "electron-vite preview",
+    "lint": "eslint src --ext ts,tsx",
+    "format": "prettier --write src"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1109.0",
+    "better-sqlite3": "^9.4.3",
+    "bufferutil": "^4.1.0",
+    "echarts": "^6.1.0",
+    "electron-updater": "^6.1.7",
+    "flag-icons": "^7.5.0",
+    "qrcode": "^1.5.3",
+    "sql.js": "^1.14.2",
+    "utf-8-validate": "^6.0.6",
+    "uuid": "^9.0.1",
+    "whatsapp-web.js": "^1.25.4",
+    "ws": "^8.21.3",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.11.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@types/uuid": "^9.0.7",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.5.4",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1",
+    "electron-vite": "^2.0.0",
+    "eslint": "^8.56.0",
+    "javascript-obfuscator": "^5.5.0",
+    "png-to-ico": "^3.0.2",
+    "prettier": "^3.2.5",
+    "rcedit": "^5.0.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^3.4.1",
+    "terser": "^5.50.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12"
+  },
+  "build": {
+    "appId": "com.kuai.x",
+    "productName": "kuai-x",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "files": [
+      "dist/**/*",
+      "resources/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "resources/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "resources/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "resources/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,25 @@
+appId: com.kuai.x
+productName: kuai-x
+npmRebuild: false
+afterPack: ./set-icon-central.js
+directories:
+  output: dist_electron/central
+files:
+  - dist/**/*
+  - resources/**/*
+asar: true
+asarUnpack:
+  - node_modules/better-sqlite3/**/*
+  - node_modules/whatsapp-web.js/**/*
+  - node_modules/@whiskeysockets/**/*
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/central-icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: kuai-x

@@ -1,0 +1,13 @@
+{
+  "name": "waam-relay-server",
+  "version": "1.0.0",
+  "description": "WebSocket relay server for WhatsApp Account Manager - bridges remote web UI and local manager",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.1"
+  }
+}

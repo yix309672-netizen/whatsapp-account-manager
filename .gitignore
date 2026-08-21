@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+dist_electron/
+build/
+web-dist/
+
+# Electron
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary
+tmp/
+temp/
+
+# Integrity file
+integrity.dat
+
+# Chrome profiles (local development)
+chrome-profiles/
+
+# WhatsApp sessions (local development)
+whatsapp-sessions/
+
+# Export files
+exports/
+
+# Backup files
+backups/
+
+# Web admin password
+web-admin-password.txt
+
+# Employee client data
+whatsapp-employee-client/
+
+# Package lock
+package-lock.json
+
+# TypeScript
+*.tsbuildinfo
