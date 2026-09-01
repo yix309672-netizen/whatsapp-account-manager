@@ -214,3 +214,139 @@ body {
 .pl-safe { padding-left: env(safe-area-inset-left); }
 .pr-safe { padding-right: env(safe-area-inset-right); }
 .mb-safe { margin-bottom: env(safe-area-inset-bottom); }
+
+/* ============================================================
+   INDUSTRIAL / MECH HUD — 机甲机械控制台风格
+   ============================================================ */
+
+/* 深炭黑 + 网格背景 */
+.mech-bg {
+  background-color: #0d0f12;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* 发光斜切角面板（clip-path 去除圆角，硬朗） */
+.mech-panel {
+  background: linear-gradient(160deg, #14171c 0%, #0d0f12 100%);
+  border: 1px solid rgba(255, 176, 0, 0.15);
+  clip-path: polygon(
+    14px 0, 100% 0, 100% calc(100% - 14px),
+    calc(100% - 14px) 100%, 0 100%, 0 14px
+  );
+  box-shadow:
+    inset 0 0 24px rgba(0, 0, 0, 0.6),
+    0 0 18px rgba(255, 176, 0, 0.05);
+  position: relative;
+}
+
+/* 面板顶部警示条 */
+.mech-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #ffb000, transparent 70%);
+  box-shadow: 0 0 12px rgba(255, 176, 0, 0.5);
+}
+
+/* 荧光绿发光边框 */
+.mech-glow-green {
+  border: 1px solid rgba(57, 255, 20, 0.35);
+  box-shadow: 0 0 16px rgba(57, 255, 20, 0.15), inset 0 0 12px rgba(57, 255, 20, 0.06);
+}
+
+/* 工业标签 */
+.mech-tag {
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.15em;
+  font-size: 10px;
+  color: #ffb000;
+  text-transform: uppercase;
+}
+.mech-tag.muted { color: #5a6270; }
+
+/* 机械按钮 */
+.mech-btn {
+  font-family: 'Courier New', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #e6edf3;
+  background: linear-gradient(180deg, #1a1e24 0%, #101318 100%);
+  border: 1px solid rgba(255, 176, 0, 0.25);
+  clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+  transition: all 0.15s;
+}
+.mech-btn:hover:not(:disabled) {
+  border-color: #ffb000;
+  color: #ffb000;
+  box-shadow: 0 0 14px rgba(255, 176, 0, 0.35);
+}
+.mech-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.mech-btn.primary {
+  background: linear-gradient(180deg, #ffb000 0%, #d68f00 100%);
+  color: #0d0f12;
+  border-color: #ffb000;
+  box-shadow: 0 0 14px rgba(255, 176, 0, 0.4);
+}
+.mech-btn.primary:hover:not(:disabled) {
+  box-shadow: 0 0 22px rgba(255, 176, 0, 0.6);
+  color: #0d0f12;
+}
+.mech-btn.green {
+  background: linear-gradient(180deg, #39ff14 0%, #1f8a0e 100%);
+  color: #0d0f12;
+  border-color: #39ff14;
+  box-shadow: 0 0 14px rgba(57, 255, 20, 0.35);
+}
+.mech-btn.green:hover:not(:disabled) {
+  box-shadow: 0 0 22px rgba(57, 255, 20, 0.55);
+  color: #0d0f12;
+}
+.mech-btn.danger {
+  border-color: rgba(255, 59, 48, 0.4);
+  color: #ff3b30;
+}
+.mech-btn.danger:hover:not(:disabled) {
+  border-color: #ff3b30;
+  color: #ff3b30;
+  box-shadow: 0 0 14px rgba(255, 59, 48, 0.4);
+}
+
+/* 扫描线 overlay */
+.mech-scanlines {
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.12) 0px,
+    rgba(0, 0, 0, 0.12) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* 准星装饰 */
+.mech-crosshair {
+  position: relative;
+}
+.mech-crosshair::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(#ffb000, #ffb000) center/1px 100% no-repeat,
+    linear-gradient(#ffb000, #ffb000) center/100% 1px no-repeat;
+  opacity: 0.08;
+}
+
+/* 金属凹凸文字 */
+.mech-metal {
+  text-shadow: 0 1px 0 #3a4450, 0 -1px 0 #000;
+}

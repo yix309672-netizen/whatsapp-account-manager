@@ -1,8 +1,7 @@
 import { useState } from 'react';
+import { Box, Flex, Text, HStack, VStack, Badge, IconButton } from '@chakra-ui/react';
 import { useAccountStore } from '../store/accountStore';
 import { Account } from '../types';
-import { StatusBadge } from './StatusBadge';
-import { WhatsAppLoginModal } from './WhatsAppLoginModal';
 import { formatPhone } from '../utils/formatPhone';
 
 interface AccountCardProps {
@@ -10,15 +9,23 @@ interface AccountCardProps {
   index: number;
 }
 
+const statusColor: Record<string, { bg: string; color: string; label: string }> = {
+  online: { bg: '#01B574', color: 'white', label: '在线' },
+  ready: { bg: '#01B574', color: 'white', label: '在线' },
+  offline: { bg: '#E2E8F0', color: '#707EAE', label: '离线' },
+  qr_pending: { bg: '#FFB547', color: 'white', label: '等待扫码' },
+  failed: { bg: '#FEB2B2', color: '#C53030', label: '失败' },
+  authenticated: { bg: '#01B574', color: 'white', label: '已认证' },
+};
+
 export function AccountCard({ account, index }: AccountCardProps): React.JSX.Element {
   const { removeAccount } = useAccountStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [showLoginModal, setShowLoginModal] = useState(false);
 
   const isOnline = account.status === 'online' || account.status === 'ready';
-  const canOneClick = !!account.has_session;
   const phoneDisplay = formatPhone(account.phone || account.name || '');
+  const st = statusColor[account.status] || { bg: '#E2E8F0', color: '#707EAE', label: account.status };
 
   const run = async (fn: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
@@ -33,53 +40,93 @@ export function AccountCard({ account, index }: AccountCardProps): React.JSX.Ele
   };
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center gap-4 shadow-sm">
-      <div className="w-12 shrink-0 text-sm font-medium text-slate-400">ID {index + 1}</div>
-      <div className="w-48 shrink-0 text-sm font-semibold text-slate-900 truncate" title={phoneDisplay}>
-        {phoneDisplay}
-      </div>
-      <div className="flex-1 min-w-0 text-sm text-slate-500 truncate" title={account.remark || ''}>
-        {account.remark || '—'}
-      </div>
-      <StatusBadge status={account.status} />
+    <Box
+      bg="white"
+      borderRadius="20px"
+      border="1px solid"
+      borderColor="#E2E8F0"
+      boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"
+      p="18px"
+      h="168px"
+      display="flex"
+      flexDirection="column"
+      justifyContent="space-between"
+      _hover={{ transform: 'translateY(-2px)', boxShadow: '0 10px 20px rgba(0,0,0,0.06)' }}
+      transition="all 0.2s"
+    >
+      {/* Top */}
+      <Flex justify="space-between" align="flex-start" gap="12px">
+        <VStack align="start" spacing="8px" flex="1" minW={0}>
+          <HStack spacing="8px">
+            <Text fontSize="11px" fontWeight="700" color="#A0AEC0">ID {index + 1}</Text>
+            <Badge bg={st.bg} color={st.color} px="8px" py="3px" borderRadius="8px" fontSize="10px" fontWeight="700">{st.label}</Badge>
+          </HStack>
+          <Text
+            fontSize="16px"
+            fontWeight="800"
+            color="#2B3674"
+            noOfLines={1}
+            title={phoneDisplay}
+            fontFamily="monospace"
+          >
+            {phoneDisplay}
+          </Text>
+          <Text fontSize="11px" color="#A0AEC0" noOfLines={1} title={account.remark || ''}>
+            {account.remark || '— 无备注 —'}
+          </Text>
+        </VStack>
+        <Text fontSize="9px" color="#CBD5E0" fontWeight="700" letterSpacing="1px" flexShrink={0}>
+          CH:{index + 1} · {isOnline ? 'ACTIVE' : 'IDLE'}
+        </Text>
+      </Flex>
 
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      <Box borderTop="1px solid" borderColor="#F1F4F9" />
 
-      <div className="flex items-center gap-2 shrink-0">
-        <button
-          onClick={() => (canOneClick ? run(() => window.api.accounts.login(account.id)) : setShowLoginModal(true))}
-          disabled={isOnline || busy}
-          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
-        >
-          {busy ? '处理中…' : '登录'}
-        </button>
-        <button
-          onClick={() => run(() => window.api.accounts.logout(account.id))}
-          disabled={!isOnline || busy}
-          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-slate-200 text-slate-700 hover:bg-slate-300 disabled:opacity-40"
-        >
-          {busy ? '处理中…' : '退出'}
-        </button>
-        <button
-          onClick={() => {
-            if (window.confirm(`确定删除账号「${phoneDisplay}」？此操作不可恢复。`)) {
-              removeAccount(account.id);
-            }
-          }}
-          title="删除账号"
-          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-white border border-red-200 text-red-600 hover:bg-red-50"
-        >
-          删除
-        </button>
-      </div>
-
-      {showLoginModal && (
-        <WhatsAppLoginModal
-          accountId={account.id}
-          accountName={phoneDisplay}
-          onClose={() => setShowLoginModal(false)}
-        />
-      )}
-    </div>
+      {/* Actions */}
+      <Box>
+        {error && (
+          <Text fontSize="11px" color="#E53E3E" noOfLines={1} mb="8px" title={error}>
+            ⚠ {error}
+          </Text>
+        )}
+        <HStack spacing="8px" justify="stretch">
+          <button
+            onClick={() => run(() => window.api.accounts.login(account.id))}
+            disabled={isOnline || busy}
+            style={{
+              flex: 1, padding: '9px 0', fontSize: '12px', fontWeight: '700', borderRadius: '12px',
+              background: isOnline ? '#E2E8F0' : '#7551FF', color: isOnline ? '#707EAE' : 'white',
+              border: '1px solid transparent', cursor: isOnline || busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1,
+            }}
+          >
+            登录
+          </button>
+          <button
+            onClick={() => run(() => window.api.accounts.logout(account.id))}
+            disabled={!isOnline || busy}
+            style={{
+              flex: 1, padding: '9px 0', fontSize: '12px', fontWeight: '700', borderRadius: '12px',
+              background: 'white', color: '#707EAE', border: '1px solid #E2E8F0',
+              cursor: !isOnline || busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1,
+            }}
+          >
+            退出
+          </button>
+          <button
+            onClick={() => {
+              if (window.confirm(`确定删除账号「${phoneDisplay}」？此操作不可恢复。`)) {
+                removeAccount(account.id);
+              }
+            }}
+            style={{
+              flex: 1, padding: '9px 0', fontSize: '12px', fontWeight: '700', borderRadius: '12px',
+              background: 'white', color: '#E53E3E', border: '1px solid #FEB2B2', cursor: 'pointer',
+            }}
+          >
+            删除
+          </button>
+        </HStack>
+      </Box>
+    </Box>
   );
 }

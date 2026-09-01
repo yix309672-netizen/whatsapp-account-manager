@@ -75,7 +75,12 @@ const api = {
   },
   templates: {
     get: () => ipcRenderer.invoke('template:get'),
-    set: (template: string) => ipcRenderer.invoke('template:set', template)
+    set: (template: string) => ipcRenderer.invoke('template:set', template),
+    publish: (template: string) => ipcRenderer.invoke('template:publish', { template })
+  },
+  settings: {
+    get: () => ipcRenderer.invoke('settings:get'),
+    set: (entries: Record<string, string>) => ipcRenderer.invoke('settings:set', { entries })
   },
   on: (channel: string, callback: (data: unknown) => void) => {
     const listener = (_event: IpcRendererEvent, data: unknown) => callback(data);

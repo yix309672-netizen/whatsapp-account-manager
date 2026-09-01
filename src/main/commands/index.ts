@@ -888,10 +888,55 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'template:set': {
       const template = String(params.template || '');
-      if (!['classic', 'modern', 'dark'].includes(template)) throw new Error('无效的模板');
+      if (!['classic', 'modern', 'dark', 'whatsapp', 'hotline'].includes(template)) throw new Error('无效的模板');
       db.prepare("INSERT INTO app_settings (key, value) VALUES ('frontend_template', ?) ON CONFLICT(key) DO UPDATE SET value = ?")
         .run(template, template);
       return { success: true, template };
+    }
+
+    // ====== 发布前端模板到 www.whatspph.com（waam-web pages） ======
+
+    case 'template:publish': {
+      const template = String(params.template || '');
+      // 统一映射：hotline 用米色新版，其余(classic/whatsapp/modern/dark)用原版
+      const target = template === 'hotline' ? 'hotline' : 'classic';
+      const { execSync } = require('child_process');
+      const npx = 'C:\\nvm4w\\nodejs\\npx.cmd';
+      const root = join(__dirname, '../../..');
+      const src = target === 'hotline' ? join(root, 'hotline-dist') : join(root, 'web-dist');
+      const cmd = `"${npx}" wrangler pages deploy "${src}" --project-name waam-web --branch main --commit-dirty=true`;
+      try {
+        const out = execSync(cmd, { encoding: 'utf8', timeout: 180000, cwd: root });
+        auditLog({ event: 'template_publish', detail: `发布模板 ${target}`, success: true });
+        return { success: true, output: out };
+      } catch (err) {
+        auditLog({ event: 'template_publish', detail: `发布失败 ${target}: ${String(err).slice(0,120)}`, success: false });
+        throw new Error('发布失败，请检查 wrangler 认证：' + String(err).slice(0, 200));
+      }
+    }
+
+    case 'settings:get': {
+      const keys = (params.keys as string[] | undefined) || [];
+      const rows = db.prepare("SELECT key, value FROM app_settings WHERE key LIKE 'frontend_text_%'").all() as Array<{ key: string; value: string }>;
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.key.replace('frontend_text_', '')] = r.value;
+      return map;
+    }
+
+    case 'settings:set': {
+      const entries = (params.entries as Record<string, string> | undefined) || {};
+      const stmt = db.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?");
+      for (const [k, v] of Object.entries(entries)) {
+        stmt.run(`frontend_text_${k}`, String(v), String(v));
+      }
+      return { success: true };
+    }
+
+    case 'settings:get_all': {
+      const rows = db.prepare("SELECT key, value FROM app_settings").all() as Array<{ key: string; value: string }>;
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.key] = r.value;
+      return map;
     }
 
     // ====== 安全模块 ======

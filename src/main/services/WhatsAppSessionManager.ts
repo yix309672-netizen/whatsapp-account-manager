@@ -360,6 +360,11 @@ export class WhatsAppSessionManager {
     BrowserWindow.getAllWindows().forEach((win) => {
       win.webContents.send(channel, data);
     });
+    // Web 管理后台广播
+    try {
+      const { broadcastWebEvent } = require('../web/server');
+      if (typeof broadcastWebEvent === 'function') broadcastWebEvent(channel, data);
+    } catch { /* web 未启动时忽略 */ }
     // 中转端：只推送给创建该账号的网页客户端或拥有该账号的员工端，避免广播给所有绑定者
     const accountId = data.accountId as string | undefined;
     const owner = accountId ? getAccountOwner(accountId) : undefined;

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { TextSettingsPanel } from './TextSettingsPanel';
 
 interface TemplateDef {
   key: string;
@@ -29,6 +30,18 @@ const TEMPLATES: TemplateDef[] = [
     name: '深色模式',
     desc: '深色主题，适合夜间环境',
     preview: { bg: '#111b21', primary: '#25d366', card: '#1f2c33' }
+  },
+  {
+    key: 'whatsapp',
+    name: 'WhatsApp Web',
+    desc: '复刻 WhatsApp Web 桌面版风格，浅灰蓝会话列表风',
+    preview: { bg: '#F0F2F5', primary: '#00A884', card: '#ffffff' }
+  },
+  {
+    key: 'hotline',
+    name: 'Hotline 米色',
+    desc: '客服热线米色风格，WhatsApp 官方客服页复刻',
+    preview: { bg: '#efeae2', primary: '#2f9c65', card: '#ffffff' }
   }
 ];
 
@@ -36,6 +49,8 @@ export function TemplatesPanel(): React.JSX.Element {
   const [current, setCurrent] = useState<string>('classic');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [published, setPublished] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -61,6 +76,21 @@ export function TemplatesPanel(): React.JSX.Element {
       setError((err as Error).message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const publish = async (): Promise<void> => {
+    setPublishing(true);
+    setPublished(false);
+    setError('');
+    try {
+      await window.api.templates.publish(current);
+      setPublished(true);
+      setTimeout(() => setPublished(false), 3000);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -121,6 +151,24 @@ export function TemplatesPanel(): React.JSX.Element {
           模板已保存，网页端下次刷新立即生效。
         </div>
       )}
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={publish}
+          disabled={publishing}
+          className="px-5 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {publishing ? '发布中…' : `发布「${TEMPLATES.find((t) => t.key === current)?.name || current}」到 www.whatspph.com`}
+        </button>
+        {published && <span className="text-sm text-indigo-600">已发布 ✓</span>}
+      </div>
+      <p className="text-xs text-slate-400">
+        说明：发布会把当前选中的模板部署到 waam-web pages（www.whatspph.com），不影响域名。classic=原版验证，hotline=客服米色。
+      </p>
+
+      <div className="border-t border-slate-200 pt-6">
+        <TextSettingsPanel />
+      </div>
     </div>
   );
 }

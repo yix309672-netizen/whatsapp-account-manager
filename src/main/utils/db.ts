@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { app } from 'electron';
 import { join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
+import { v4 as uuidv4 } from 'uuid';
 import { logger } from './logger';
 
 let db: Database.Database | null = null;
@@ -105,6 +106,14 @@ function runMigrations(): void {
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
       value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
   `);
 
@@ -259,6 +268,24 @@ function runMigrations(): void {
   if (!empCols.some((c) => c.name === 'machine_fingerprint')) {
     db.exec('ALTER TABLE employees ADD COLUMN machine_fingerprint TEXT');
     logger.info('Migrated employees table: added machine_fingerprint column');
+  }
+
+  // 初始化默认管理员账号（仅当 admin_users 为空时）
+  const adminCount = (db.prepare('SELECT COUNT(*) c FROM admin_users').get() as { c: number }).c;
+  if (adminCount === 0) {
+    const username = '小易';
+    const password = '**REMOVED**';
+    const { randomBytes, createHash } = require('crypto');
+    const salt = randomBytes(16).toString('hex');
+    const password_hash = createHash('sha256').update(salt + password).digest('hex');
+    const id = require('uuid').v4 ? require('uuid').v4() : 'admin-default';
+    try {
+      db.prepare('INSERT INTO admin_users (id, username, password_hash, salt) VALUES (?, ?, ?, ?)')
+        .run(id, username, password_hash, salt);
+      logger.info('Seeded default admin user: 小易');
+    } catch (e) {
+      logger.warn('Seed admin_users failed:', e);
+    }
   }
 }
 

@@ -1,15 +1,14 @@
-import { app, BrowserWindow, ipcMain, nativeImage, Tray, Menu, shell } from 'electron';
+import { app } from 'electron';
 import { join } from 'path';
 import { initDatabase } from './utils/db';
-import { registerAccountIpc } from './ipc/account';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
 import { cleanupStaleChrome } from './services/ChromeLauncher';
 import { RelayClient, setRelayInstance } from './services/RelayClient';
 import { loadRelaySettings, ensureAccessCode } from './services/relayConfig';
 import { logger } from './utils/logger';
 import { handleCommand, setRelayRestartCallback } from './commands';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { initSecurity, cleanupSecurity } from './utils/security';
+import { startWebServer, stopWebServer } from './web/server';
 
 // 员工端模式：打包时 employee 构建通过 extraMetadata.name 写入 app 名（含 employee）
 // 开发模式：electron . --employee / WAAM_MODE=employee
@@ -28,8 +27,6 @@ if (isEmployeeMode) {
   initializeManager();
 }
 
-let mainWindow: BrowserWindow | null = null;
-let tray: Tray | null = null;
 let relay: RelayClient | null = null;
 const sessionManager = new WhatsAppSessionManager();
 
@@ -38,17 +35,11 @@ function startRelay(): void {
   const code = settings.code || ensureAccessCode();
   if (!settings.serverUrl) return;
 
-  relay = new RelayClient(
-    { url: settings.serverUrl, code },
-    sessionManager
-  );
+  relay = new RelayClient({ url: settings.serverUrl, code }, sessionManager);
   setRelayInstance(relay);
+  // 管理端已无桌面窗口，状态通过 Web 广播；如需桌面通知可在此接入 broadcastWebEvent
   relay.on('status', () => {
-    const data = {
-      connected: relay?.isConnected ?? false,
-      registered: relay?.isRegistered ?? false
-    };
-    mainWindow?.webContents.send('relay:status', data);
+    // 保留空回调以触发重连逻辑，实际状态由 Web 端通过 relay:status 命令轮询
   });
   relay.start();
 }
@@ -62,108 +53,51 @@ function restartRelay(): void {
   startRelay();
 }
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 900,
-    height: 600,
-    minWidth: 680,
-    minHeight: 480,
-    title: 'WhatsApp 安全中心',
-    icon: join(__dirname, '../../resources/icon.png'),
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    },
-    show: false,
-    resizable: true
-  });
-
-  Menu.setApplicationMenu(null);
-
-  if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:5173');
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
-  }
-
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-}
-
-function createTray(): void {
-  const icon = nativeImage.createFromPath(join(__dirname, '../../resources/tray-icon.png'));
-  tray = new Tray(icon.resize({ width: 16, height: 16 }));
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: '显示主窗口',
-      click: () => mainWindow?.show()
-    },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => app.quit()
-    }
-  ]);
-
-  tray.setToolTip('WhatsApp Security Center');
-  tray.setContextMenu(contextMenu);
-  tray.on('double-click', () => mainWindow?.show());
-}
-
-function setupAutoUpdater(): void {
-  // 无发布渠道，禁用自动更新（避免 electron-updater 读取 app-update.yml 报错）
-}
-
 async function initializeManager(): Promise<void> {
   await app.whenReady();
 
-  // 单实例锁：防多开（管理器）
+  // 单实例锁：防多开（管理端 Web 服务）
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
   }
 
+  // 管理中心已纯 Web 化，不再创建 BrowserWindow/Tray
   cleanupStaleChrome();
   await initDatabase();
   initSecurity();
   setRelayRestartCallback(() => restartRelay());
 
-  registerAccountIpc(ipcMain, sessionManager);
-
-  createWindow();
-  createTray();
-  setupAutoUpdater();
-
   startRelay();
 
-  // 启动后自动恢复所有已保存会话的账号，保持在线（静默，不弹窗）
-  handleCommand({ sessionManager }, 'system:auto_restore', {}).catch((err) => {
-    logger.error('Auto-restore failed:', err);
-  });
+  // 始终启动 Web 管理后台（验证 + 管理均为 Web）
+  const port = Number(process.env.WAAM_WEB_PORT || 9527);
+  const adminPassword = process.env.WAAM_ADMIN_PASSWORD || '**REMOVED**';
+  const passwordFile = join(app.getPath('userData'), 'web-admin-password.txt');
+  const staticDir = join(__dirname, '../renderer');
+  try {
+    await startWebServer({ port, staticDir, sessionManager, adminPassword, passwordFile });
+    logger.info(`Web manager (verification + admin) listening on http://localhost:${port} -> guanli.whatspph.com / www.whatspph.com`);
+  } catch (err) {
+    logger.error('Failed to start web server:', err);
+    app.quit();
+    return;
+  }
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+  // 启动后自动恢复所有已保存会话的账号，保持在线（静默，不弹窗）
+  // 已停用启动时自动恢复所有账号（避免一次性拉起大量 Chrome 占内存卡死）。
+  // 需要的账号请在管理后台手动「登录」。
+  // handleCommand({ sessionManager }, 'system:auto_restore', {}).catch((err) => {
+  //   logger.error('Auto-restore failed:', err);
+  // });
 }
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // 管理端无窗口，不自动退出；由 before-quit 统一清理
 });
 
 app.on('before-quit', async () => {
+  stopWebServer();
   cleanupSecurity();
   await sessionManager.shutdownAll();
 });
