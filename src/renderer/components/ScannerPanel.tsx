@@ -18,7 +18,8 @@ export function ScannerPanel(): React.JSX.Element {
   const [pairCode, setPairCode] = useState('');
   const [pairCd, setPairCd] = useState(0);
   const [pairErr, setPairErr] = useState('');
-  const [cfg, setCfg] = useState<any>({ mode:'balanced', minMs:4000, maxMs:8000, batchSize:25, batchRestMinMs:60000, batchRestMaxMs:120000, hourlyCap:800, maxConsecErr:5, checkAvatar:true, presenceGapMs:3000, presenceTimeoutMs:10000, presenceCacheDays:7 });
+  const [cfg, setCfg] = useState<any>({ mode:'balanced', minMs:4000, maxMs:8000, batchSize:25, batchRestMinMs:60000, batchRestMaxMs:120000, hourlyCap:800, maxConsecErr:5, checkAvatar:true, checkStatusMsg:true, presenceGapMs:3000, presenceTimeoutMs:10000, presenceCacheDays:7 });
+  const [kw, setKw] = useState('');
   const [checkers, setCheckers] = useState<CheckerRow[]>([]);
   const [checkerCount, setCheckerCount] = useState(1);
   const [qrMap, setQrMap] = useState<Record<number,string>>({});
@@ -256,6 +257,9 @@ export function ScannerPanel(): React.JSX.Element {
           <HStack spacing="4px">
             <input type="checkbox" checked={cfg.checkAvatar !== false} onChange={(e)=>upd({checkAvatar:e.target.checked})} />
             <Text fontSize="11px" color="#4A5568">检测头像（慢约1倍；关=更快更稳）</Text></HStack>
+          <HStack spacing="4px">
+            <input type="checkbox" checked={cfg.checkStatusMsg !== false} onChange={(e)=>upd({checkStatusMsg:e.target.checked})} />
+            <Text fontSize="11px" color="#4A5568">读个性签名（对方关隐私则为空）</Text></HStack>
           <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">活跃间隔</Text>
             <Input value={Math.round((cfg.presenceGapMs ?? 3000)/1000)} onChange={(e)=>upd({presenceGapMs:Number(e.target.value)*1000})} size="xs" width="52px" type="number" />
             <Text fontSize="11px" color="#718096">秒/号</Text></HStack>
@@ -515,12 +519,22 @@ export function ScannerPanel(): React.JSX.Element {
               <button onClick={()=>setSelected(null)} style={{padding:'4px 8px', fontSize:'11px', borderRadius:'6px', border:'1px solid #E2E8F0'}}>关闭</button>
             </HStack>
           </Flex>
+          <HStack mt="8px" spacing="6px">
+            <Text fontSize="11px" color="#718096">关键词</Text>
+            <Input value={kw} onChange={(e)=>setKw(e.target.value)} placeholder="搜号码/签名/昵称" size="xs" width="220px" />
+            {kw && <button onClick={()=>setKw('')} style={{padding:'4px 8px', fontSize:'11px', borderRadius:'6px', border:'1px solid #E2E8F0'}}>清空</button>}
+          </HStack>
           <Box maxH="300px" overflowY="auto" mt="8px" fontSize="11px">
             <table style={{width:'100%', borderCollapse:'collapse'}}>
-              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>头像</th><th>错误</th></tr></thead>
+              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>头像</th><th style={{textAlign:'left'}}>签名</th><th style={{textAlign:'left'}}>昵称</th><th>错误</th></tr></thead>
               <tbody>
-                {selected.results.filter((r:any)=> resultFilter==='all' ? true : resultFilter==='valid' ? r.exists_flag : !r.exists_flag).map((r:any,i:number)=>(
-                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
+                {selected.results.filter((r:any)=>{
+                  if (!(resultFilter==='all' ? true : resultFilter==='valid' ? r.exists_flag : !r.exists_flag)) return false;
+                  if (!kw.trim()) return true;
+                  const k = kw.trim().toLowerCase();
+                  return String(r.phone||'').includes(k) || String(r.status_msg||'').toLowerCase().includes(k) || String(r.pushname||'').toLowerCase().includes(k);
+                }).map((r:any,i:number)=>(
+                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', maxWidth:'180px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.status_msg || ''}</td><td style={{fontSize:'10px', maxWidth:'120px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.pushname || ''}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
                 ))}
               </tbody>
             </table>

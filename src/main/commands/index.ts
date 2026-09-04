@@ -1160,7 +1160,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     case 'scanner:set_config': {
       const { setScanCfg } = await import('../services/BaileysScanner');
       const patch = (params.config || params) as Record<string, unknown>;
-      const allowed: Record<string, true> = { mode: true, minMs: true, maxMs: true, batchSize: true, batchRestMinMs: true, batchRestMaxMs: true, hourlyCap: true, maxConsecErr: true, checkAvatar: true, retryRounds: true, retryCooldownMs: true, presenceGapMs: true, presenceTimeoutMs: true, presenceCacheDays: true };
+      const allowed: Record<string, true> = { mode: true, minMs: true, maxMs: true, batchSize: true, batchRestMinMs: true, batchRestMaxMs: true, hourlyCap: true, maxConsecErr: true, checkAvatar: true, checkStatusMsg: true, retryRounds: true, retryCooldownMs: true, presenceGapMs: true, presenceTimeoutMs: true, presenceCacheDays: true };
       const clean: Record<string, unknown> = {};
       for (const k of Object.keys(allowed)) if (patch[k] !== undefined) clean[k] = patch[k];
       const config = setScanCfg(clean as never);
@@ -1190,7 +1190,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         const results = db.prepare('SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
         return { task: t, results, kind: 'presence' };
       }
-      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
+      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
       return { task: t, results, kind: 'register' };
     }
     case 'scanner:start': {
@@ -1264,11 +1264,12 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       const onlyValid = !!params.onlyValid;
       const rows = db.prepare(
         onlyValid
-          ? 'SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? AND exists_flag=1 ORDER BY created_at'
-          : 'SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? ORDER BY created_at'
+          ? 'SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? AND exists_flag=1 ORDER BY created_at'
+          : 'SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? ORDER BY created_at'
       ).all(tid) as any[];
-      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,错误\n';
-      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${(r.error || '').replace(/,/g, ' ')}`).join('\n');
+      const esc = (s: string) => String(s || '').replace(/,/g, ' ').replace(/[\r\n]+/g, ' ');
+      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,个性签名,昵称,错误\n';
+      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${esc(r.error)}`).join('\n');
       const csv = header + body;
       const { join } = await import('path');
       const { writeFileSync, existsSync, mkdirSync } = await import('fs');

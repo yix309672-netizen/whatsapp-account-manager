@@ -195,6 +195,7 @@ export interface ScanCfg {
   hourlyCap: number;                  // 每个号每小时上限（0=不限）
   maxConsecErr: number;               // 连续失败熔断阈值
   checkAvatar: boolean;               // 是否检测头像（多一次请求，慢约1倍）
+  checkStatusMsg: boolean;            // 是否读取个性签名 about（多一次 USync 查询；对方设隐私不可见则为空）
   retryRounds: number;                // 出错号码自动重查轮数（0-3，默认1；只重查报错的，不断点从头来）
   retryCooldownMs: number;            // 重查前冷却（默认60s，可中断）
   presenceGapMs: number;              // 活跃度：每号间隔（默认3s，presence 订阅成本高）
@@ -202,9 +203,9 @@ export interface ScanCfg {
   presenceCacheDays: number;          // 活跃度：缓存天数（0=每次都重查，默认7）
 }
 export const SCAN_PRESETS: Record<Exclude<ScanMode, 'custom'>, Omit<ScanCfg, 'mode'>> = {
-  stealth:  { minMs: 8000, maxMs: 15000, batchSize: 20, batchRestMinMs: 120000, batchRestMaxMs: 240000, hourlyCap: 300,  maxConsecErr: 3, checkAvatar: true, retryRounds: 2, retryCooldownMs: 120000, presenceGapMs: 5000, presenceTimeoutMs: 12000, presenceCacheDays: 7 },
-  balanced: { minMs: 4000, maxMs: 8000,  batchSize: 25, batchRestMinMs: 60000,  batchRestMaxMs: 120000, hourlyCap: 800,  maxConsecErr: 5, checkAvatar: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 3000, presenceTimeoutMs: 10000, presenceCacheDays: 7 },
-  fast:     { minMs: 2000, maxMs: 4000,  batchSize: 30, batchRestMinMs: 30000,  batchRestMaxMs: 60000,  hourlyCap: 1500, maxConsecErr: 8, checkAvatar: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 2000, presenceTimeoutMs: 8000, presenceCacheDays: 7 },
+  stealth:  { minMs: 8000, maxMs: 15000, batchSize: 20, batchRestMinMs: 120000, batchRestMaxMs: 240000, hourlyCap: 300,  maxConsecErr: 3, checkAvatar: true, checkStatusMsg: true, retryRounds: 2, retryCooldownMs: 120000, presenceGapMs: 5000, presenceTimeoutMs: 12000, presenceCacheDays: 7 },
+  balanced: { minMs: 4000, maxMs: 8000,  batchSize: 25, batchRestMinMs: 60000,  batchRestMaxMs: 120000, hourlyCap: 800,  maxConsecErr: 5, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 3000, presenceTimeoutMs: 10000, presenceCacheDays: 7 },
+  fast:     { minMs: 2000, maxMs: 4000,  batchSize: 30, batchRestMinMs: 30000,  batchRestMaxMs: 60000,  hourlyCap: 1500, maxConsecErr: 8, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 2000, presenceTimeoutMs: 8000, presenceCacheDays: 7 },
 };
 export const SCAN_DEFAULTS: ScanCfg = { mode: 'balanced', ...SCAN_PRESETS.balanced };
 const SCAN_CFG_KEY = 'scanner_cfg';
@@ -224,6 +225,7 @@ export function getScanCfg(): ScanCfg {
       cfg.hourlyCap = Math.min(Math.max(0, Math.floor(Number(cfg.hourlyCap) || 0)), 5000);
       cfg.maxConsecErr = Math.min(Math.max(2, Math.floor(Number(cfg.maxConsecErr) || 0)), 20);
       cfg.checkAvatar = cfg.checkAvatar !== false;
+      cfg.checkStatusMsg = (cfg as any).checkStatusMsg !== false;
       cfg.retryRounds = Math.min(Math.max(0, Math.floor(Number((cfg as any).retryRounds) || 0)), 3);
       cfg.retryCooldownMs = Math.min(Math.max(30000, Math.floor(Number((cfg as any).retryCooldownMs) || 0)), 600000);
       cfg.presenceGapMs = Math.min(Math.max(1500, Math.floor(Number((cfg as any).presenceGapMs) || 0)), 30000);
@@ -466,8 +468,8 @@ export function clearScannerAuth(): void {
 
 // ================== 注册筛查 ==================
 
-// 单号查询（注册+可选头像），供分片循环与补查共用
-async function checkOne(c: Checker, raw: string, cfg: ScanCfg): Promise<{ exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string }> {
+// 单号查询（注册+可选头像+可选个性签名），供分片循环与补查共用
+async function checkOne(c: Checker, raw: string, cfg: ScanCfg): Promise<{ exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string; statusMsg: string }> {
   const jid = `${raw}@s.whatsapp.net`;
   if (!c.sock || c.connectionState !== 'open') throw new Error(`checker #${c.id} 未连接`);
   const res = await withTimeout(c.sock.onWhatsApp(jid), 20000, '查询号码');
@@ -475,16 +477,30 @@ async function checkOne(c: Checker, raw: string, cfg: ScanCfg): Promise<{ exists
   let exists = false;
   let hasAvatar = false;
   let avatarUrl = '';
+  let statusMsg = '';
   if (r && r.exists) {
     exists = true;
+    const targetJid = (r as any).jid || jid;
     if (cfg.checkAvatar) {
       try {
-        avatarUrl = (await withTimeout(c.sock.profilePictureUrl(r.jid || jid, 'image'), 15000, '头像查询')) || '';
+        avatarUrl = (await withTimeout(c.sock.profilePictureUrl(targetJid, 'image'), 15000, '头像查询')) || '';
         if (avatarUrl) hasAvatar = true;
       } catch { hasAvatar = false; }
     }
+    // 个性签名 about：USync status 协议按需可查；对方隐私关闭则为空（非异常）
+    if (cfg.checkStatusMsg) {
+      try {
+        const st = await withTimeout(c.sock.fetchStatus(targetJid), 15000, '签名查询');
+        const arr = Array.isArray(st) ? st : [];
+        for (const item of arr) {
+          const s = (item as any)?.status;
+          const txt = typeof s === 'string' ? s : s?.status;
+          if (typeof txt === 'string' && txt.trim()) { statusMsg = txt.trim().slice(0, 200); break; }
+        }
+      } catch { /* 签名不可见视为无，不记错 */ }
+    }
   }
-  return { exists, hasAvatar, avatarUrl, jid: (r && (r as any).jid) || jid };
+  return { exists, hasAvatar, avatarUrl, jid: (r && (r as any).jid) || jid, statusMsg };
 }
 
 function pauseTask(taskId: string, reason?: string): void {
@@ -507,15 +523,15 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
   let shardDone = 0;
 
   const processOne = async (raw: string): Promise<{ ok: boolean; err?: string }> => {
-    let r: { exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string };
+    let r: { exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string; statusMsg: string };
     try {
       r = await checkOne(c, raw, cfg);
     } catch (e: any) {
       return { ok: false, err: String(e?.message || e).slice(0, 200) };
     }
     const rid = uuidv4();
-    db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, error, created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-      .run(rid, taskId, raw, r.jid, r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, '', Math.floor(Date.now() / 1000));
+    db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(rid, taskId, raw, r.jid, r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', '', Math.floor(Date.now() / 1000));
     db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
       .run(r.exists ? 1 : 0, r.exists ? 0 : 1, taskId);
     return { ok: true };
@@ -542,8 +558,8 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
     if (!res.ok) {
       // 失败记一行（供补查），计数照常 +1（done 含失败，避免 resume 死循环）
       const rid = uuidv4();
-      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, error, created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-        .run(rid, taskId, raw, `${raw}@s.whatsapp.net`, 0, 0, '', res.err || '', Math.floor(Date.now() / 1000));
+      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(rid, taskId, raw, `${raw}@s.whatsapp.net`, 0, 0, '', '', '', res.err || '', Math.floor(Date.now() / 1000));
       db.prepare(`UPDATE scanner_tasks SET done=done+1, invalid_count=invalid_count+1 WHERE id=?`).run(taskId);
       retryQueue.push({ raw, rid });
       // 连续失败熔断：大概率被限流/掉线，自动暂停保号（断点保留）
@@ -595,8 +611,8 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
       try {
         const r = await checkOne(c, item.raw, cfg);
         const old = db.prepare('SELECT exists_flag FROM scanner_results WHERE id=?').get(item.rid) as any;
-        db.prepare('UPDATE scanner_results SET exists_flag=?, has_avatar=?, avatar_url=?, error=?, jid=? WHERE id=?')
-          .run(r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, '', r.jid, item.rid);
+        db.prepare('UPDATE scanner_results SET exists_flag=?, has_avatar=?, avatar_url=?, status_msg=?, error=?, jid=? WHERE id=?')
+          .run(r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', r.jid, item.rid);
         if (r.exists && !old?.exists_flag) {
           db.prepare('UPDATE scanner_tasks SET valid_count=valid_count+1, invalid_count=invalid_count-1 WHERE id=?').run(taskId);
         }
@@ -694,6 +710,8 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
       let exists = false;
       let hasAvatar = false;
       let avatarUrl = '';
+      let statusMsg = '';
+      let pushname = '';
       let error = '';
       let outJid = jid;
       try {
@@ -706,19 +724,38 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
         } else {
           throw new Error('当前通道 Client 不支持 isRegisteredUser/getNumberId');
         }
-        if (exists && cfg.checkAvatar) {
+        if (exists) {
+          let contact: any = null;
           try {
-            const contact: any = await withTimeout(client.getContactById(outJid), 15000, '取联系人');
-            avatarUrl = (await withTimeout(contact.getProfilePicUrl(), 15000, '头像查询')) || '';
-            if (avatarUrl) hasAvatar = true;
-          } catch { hasAvatar = false; }
+            contact = await withTimeout(client.getContactById(outJid), 15000, '取联系人');
+          } catch { contact = null; }
+          if (contact) {
+            // 昵称：联系人对象自带（非通讯录号码可能为空，尽力取）
+            try {
+              const nm = contact.pushname || contact.name || contact.shortName;
+              if (typeof nm === 'string' && nm.trim()) pushname = nm.trim().slice(0, 100);
+            } catch {}
+            if (cfg.checkAvatar) {
+              try {
+                avatarUrl = (await withTimeout(contact.getProfilePicUrl(), 15000, '头像查询')) || '';
+                if (avatarUrl) hasAvatar = true;
+              } catch { hasAvatar = false; }
+            }
+            if (cfg.checkStatusMsg && typeof contact.getAbout === 'function') {
+              try {
+                const about = await withTimeout(contact.getAbout(), 15000, '签名查询');
+                const txt = (about as any)?.status;
+                if (typeof txt === 'string' && txt.trim()) statusMsg = txt.trim().slice(0, 200);
+              } catch { /* 签名不可见视为无 */ }
+            }
+          }
         }
       } catch (e: any) {
         error = String(e?.message || e).slice(0, 200);
       }
       const rid = uuidv4();
-      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, error, created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-        .run(rid, taskId, raw, outJid, exists ? 1 : 0, hasAvatar ? 1 : 0, avatarUrl, error, Math.floor(Date.now() / 1000));
+      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(rid, taskId, raw, outJid, exists ? 1 : 0, hasAvatar ? 1 : 0, avatarUrl, statusMsg, pushname, error, Math.floor(Date.now() / 1000));
       db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
         .run(exists ? 1 : 0, exists ? 0 : 1, taskId);
       const p = await readTaskProgress(taskId);

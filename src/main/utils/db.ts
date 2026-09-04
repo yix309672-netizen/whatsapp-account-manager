@@ -263,6 +263,19 @@ function runMigrations(): void {
     logger.info('Migrated accounts table: added remark column');
   }
 
+  // 迁移：scanner_results 新增 status_msg（个性签名）/ pushname（昵称，仅 Web 通道尽力取）列
+  try {
+    const srCols = db.prepare('PRAGMA table_info(scanner_results)').all() as Array<{ name: string }>;
+    if (!srCols.some((c) => c.name === 'status_msg')) {
+      db.exec('ALTER TABLE scanner_results ADD COLUMN status_msg TEXT');
+      logger.info('Migrated scanner_results table: added status_msg column');
+    }
+    if (!srCols.some((c) => c.name === 'pushname')) {
+      db.exec('ALTER TABLE scanner_results ADD COLUMN pushname TEXT');
+      logger.info('Migrated scanner_results table: added pushname column');
+    }
+  } catch (err) { logger.warn('Migrate scanner_results columns failed:', err); }
+
   // 迁移：scanner_tasks 新增 channel 列（pool=Checker池，web:<accountId>=管理器已登录账号直查）
   try {
     const chCols = db.prepare('PRAGMA table_info(scanner_tasks)').all() as Array<{ name: string }>;
