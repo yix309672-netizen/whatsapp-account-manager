@@ -67,7 +67,10 @@ export function SecurityPanel(): React.JSX.Element {
     <Box>
       <Text fontWeight="700" fontSize="13px" mb="8px">登录 IP 白名单</Text>
       <Flex gap="16px" wrap="wrap">
-        <AllowCard scope="admin" title="管理端（guanli）" desc="卡登录 / 验证码 / 改密码 / WS。验证 H5 公开接口不受影响。" />
+        <Box flex="1" minW="260px" bg="#F8FAFC" border="1px dashed #CBD5E0" borderRadius="12px" p="14px">
+          <Text fontWeight="700" fontSize="13px" color="#718096">管理端（guanli）</Text>
+          <Text fontSize="11px" color="#A0AEC0" mt="4px">IP 限制已关闭，仅员工端启用。</Text>
+        </Box>
         <AllowCard scope="employee" title="员工端" desc="卡员工账号登录（中转/直连均按真实 IP 判定）。" />
       </Flex>
       <Flex justify="space-between" align="center" mt="16px" mb="8px">

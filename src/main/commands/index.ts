@@ -1044,20 +1044,22 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     }
 
     case 'security:ip_allowlist': {
-      const scope = String(params.scope || 'admin');
-      if (scope !== 'admin' && scope !== 'employee') throw new Error('scope 只能是 admin/employee');
-      const envKey = scope === 'admin' ? 'WAAM_ADMIN_IP_ALLOWLIST' : 'WAAM_EMPLOYEE_IP_ALLOWLIST';
-      const envVal = String(process.env[envKey] || '').trim();
+      const scope: string = String(params.scope || 'employee');
+      if (scope === 'admin') return { scope, source: 'off', list: [], note: '管理端IP限制已关闭，仅员工端启用' };
+      if (scope !== 'employee') throw new Error('scope 只能是 admin/employee');
+      // 到这里 scope 一定是 employee（admin 已提前返回）
+      const envVal = String(process.env.WAAM_EMPLOYEE_IP_ALLOWLIST || '').trim();
       if (envVal) return { scope, source: 'env', list: parseAllowList(envVal) };
-      const row = db.prepare('SELECT value FROM app_settings WHERE key=?').get(`${scope}_ip_allowlist`) as { value: string } | undefined;
+      const row = db.prepare('SELECT value FROM app_settings WHERE key=?').get('employee_ip_allowlist') as { value: string } | undefined;
       return { scope, source: 'db', list: parseAllowList(row?.value || '') };
     }
     case 'security:ip_allowlist_set': {
-      const scope = String(params.scope || 'admin');
-      if (scope !== 'admin' && scope !== 'employee') throw new Error('scope 只能是 admin/employee');
-      const envKey = scope === 'admin' ? 'WAAM_ADMIN_IP_ALLOWLIST' : 'WAAM_EMPLOYEE_IP_ALLOWLIST';
-      if (String(process.env[envKey] || '').trim()) {
-        throw new Error(`当前由环境变量 ${envKey} 接管，改环境变量后重启生效`);
+      const scope: string = String(params.scope || 'employee');
+      if (scope === 'admin') throw new Error('管理端IP限制已关闭，无需设置');
+      if (scope !== 'employee') throw new Error('scope 只能是 admin/employee');
+      // 到这里 scope 一定是 employee（admin 已提前抛错）
+      if (String(process.env.WAAM_EMPLOYEE_IP_ALLOWLIST || '').trim()) {
+        throw new Error('当前由环境变量 WAAM_EMPLOYEE_IP_ALLOWLIST 接管，改环境变量后重启生效');
       }
       const raw = Array.isArray(params.list) ? (params.list as string[]).join('\n') : String(params.list || '');
       const list = parseAllowList(raw);
