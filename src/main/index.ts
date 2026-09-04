@@ -77,7 +77,8 @@ async function initializeManager(): Promise<void> {
 
   // 始终启动 Web 管理后台（验证 + 管理均为 Web）
   const port = Number(process.env.WAAM_WEB_PORT || 9527);
-  const adminPassword = process.env.WAAM_ADMIN_PASSWORD || '**REMOVED**';
+  // 管理员密码只从环境变量来，不再设仓库可见的默认值（实际鉴权走 admin_users 表）
+  const adminPassword = process.env.WAAM_ADMIN_PASSWORD || '';
   const passwordFile = join(app.getPath('userData'), 'web-admin-password.txt');
   const staticDir = join(__dirname, '../renderer');
   try {

@@ -11,14 +11,15 @@
 # 方式一：环境变量
 WAAM_WEB_PORT=9527 WAAM_ADMIN_PASSWORD=你的密码 WhatsApp Account Manager.exe --web
 
-# 方式二：默认值（端口 9527，密码 **REMOVED**）
+# 方式二：直接启动（端口 9527；初始密码看下方说明）
 WhatsApp Account Manager.exe --web
 ```
 
 - 端口：环境变量 `WAAM_WEB_PORT`，默认 `9527`
-- 管理员密码：环境变量 `WAAM_ADMIN_PASSWORD`，默认 `**REMOVED**`
-  - 首次启动后密码哈希保存在 `%APPDATA%\whatsapp-account-manager\web-admin-password.txt`，
-    之后修改环境变量不会再改变已存密码（要改密码删除该文件后重启）
+- 管理员密码（仓库里不放任何默认密码）：
+  - 首次启动：优先读环境变量 `WAAM_ADMIN_PASSWORD`；没设则随机生成，
+    明文只保存在本机 `%APPDATA%\<应用名>\web-admin-password.txt`（该文件已 gitignore，不进仓库）
+  - 已有账号后：在管理后台用改密码接口修改；不要把密码写进代码或文档
 - 浏览器访问：`http://服务器IP:9527`，登录页输入管理员密码
 
 ## 安全建议（必须）
