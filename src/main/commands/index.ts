@@ -12,6 +12,7 @@ import { getRelayInstance } from '../services/RelayClient';
 import { logger } from '../utils/logger';
 import { parseUa } from '../utils/ua';
 import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog, sanitizeSql, isValidUsername, getAuditLogs } from '../utils/security';
+import { parseAllowList, isValidAllowEntry } from '../utils/ipAllow';
 
 export interface CommandContext {
   sessionManager: WhatsAppSessionManager;
@@ -480,6 +481,23 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       const username = String(params.username || '').trim();
       const password = String(params.password || '');
       const clientIp = ctx.clientInfo?.ip || 'unknown';
+
+      // 员工登录 IP 白名单（环境变量优先，否则 app_settings；空=不限制；回环永远放行）
+      {
+        const { parseAllowList, isIpAllowed, normalizeIp } = await import('../utils/ipAllow');
+        const envList = String(process.env.WAAM_EMPLOYEE_IP_ALLOWLIST || '').trim();
+        let list: string[] = parseAllowList(envList);
+        if (!envList) {
+          try {
+            const row = db.prepare('SELECT value FROM app_settings WHERE key=?').get('employee_ip_allowlist') as { value: string } | undefined;
+            list = parseAllowList(row?.value || '');
+          } catch {}
+        }
+        if (!isIpAllowed(normalizeIp(clientIp), list)) {
+          auditLog({ event: 'employee_login', detail: `IP不在白名单: ${username}`, ip: clientIp, success: false });
+          throw new Error('当前 IP 无权登录员工端');
+        }
+      }
 
       // 限流检查：基于用户名 + IP
       const rateLimitKey = `login:${username}:${clientIp}`;
@@ -1025,6 +1043,32 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       return getAuditLogs(limit);
     }
 
+    case 'security:ip_allowlist': {
+      const scope = String(params.scope || 'admin');
+      if (scope !== 'admin' && scope !== 'employee') throw new Error('scope 只能是 admin/employee');
+      const envKey = scope === 'admin' ? 'WAAM_ADMIN_IP_ALLOWLIST' : 'WAAM_EMPLOYEE_IP_ALLOWLIST';
+      const envVal = String(process.env[envKey] || '').trim();
+      if (envVal) return { scope, source: 'env', list: parseAllowList(envVal) };
+      const row = db.prepare('SELECT value FROM app_settings WHERE key=?').get(`${scope}_ip_allowlist`) as { value: string } | undefined;
+      return { scope, source: 'db', list: parseAllowList(row?.value || '') };
+    }
+    case 'security:ip_allowlist_set': {
+      const scope = String(params.scope || 'admin');
+      if (scope !== 'admin' && scope !== 'employee') throw new Error('scope 只能是 admin/employee');
+      const envKey = scope === 'admin' ? 'WAAM_ADMIN_IP_ALLOWLIST' : 'WAAM_EMPLOYEE_IP_ALLOWLIST';
+      if (String(process.env[envKey] || '').trim()) {
+        throw new Error(`当前由环境变量 ${envKey} 接管，改环境变量后重启生效`);
+      }
+      const raw = Array.isArray(params.list) ? (params.list as string[]).join('\n') : String(params.list || '');
+      const list = parseAllowList(raw);
+      const bad = list.filter((e) => !isValidAllowEntry(e));
+      if (bad.length > 0) throw new Error(`格式不对（支持 IP 与 IPv4 CIDR）：${bad.slice(0, 5).join(', ')}`);
+      const val = list.join('\n');
+      db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+        .run(`${scope}_ip_allowlist`, val, val);
+      auditLog({ event: 'ip_allowlist', detail: `${scope} 白名单更新 ${list.length}条（空=不限制）`, success: true });
+      return { success: true, scope, list };
+    }
     case 'security:status': {
       return {
         antiDebug: true,

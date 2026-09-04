@@ -7,6 +7,24 @@ import { handleCommand, CommandContext } from '../commands';
 import { WhatsAppSessionManager } from '../services/WhatsAppSessionManager';
 import { logger } from '../utils/logger';
 import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog } from '../utils/security';
+import { parseAllowList, isIpAllowed, getClientIp } from '../utils/ipAllow';
+
+// 管理后台登录 IP 白名单：环境变量优先，否则读 app_settings(admin_ip_allowlist)。
+// 空 = 不限制；本机回环永远放行（防锁死）；仅卡管理员面（登录/验证码/改密/WS），验证 H5 公开接口不受影响。
+function getAdminAllowList(): string[] {
+  const env = String(process.env.WAAM_ADMIN_IP_ALLOWLIST || '').trim();
+  if (env) return parseAllowList(env);
+  try {
+    const row = getDb().prepare('SELECT value FROM app_settings WHERE key=?').get('admin_ip_allowlist') as { value: string } | undefined;
+    return parseAllowList(row?.value || '');
+  } catch { return []; }
+}
+
+function denyAdminIp(res: ServerResponse, ip: string, surface: string): void {
+  auditLog({ event: 'admin_ip_deny', detail: `非白名单IP访问${surface}: ${ip}`, ip, success: false });
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: '当前 IP 无权登录管理后台' }));
+}
 
 // ==================== 会话 token 管理 ====================
 
@@ -283,6 +301,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 验证码下发（登录页用，需浏览器指纹，防批量刷接口）
     if (pathname === '/api/captcha' && req.method === 'GET') {
+      const cip = getClientIp(req);
+      if (!isIpAllowed(cip, getAdminAllowList())) { denyAdminIp(res, cip, '验证码'); return; }
       const { id, text } = makeCaptcha();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, id, svg: captchaSvg(text) }));
@@ -292,6 +312,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     // 登录接口
     if (pathname === '/api/login' && req.method === 'POST') {
       const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      if (!isIpAllowed(getClientIp(req), getAdminAllowList())) { denyAdminIp(res, getClientIp(req), '登录'); return; }
       const key = `web_login:${ip}`;
       const rl = checkRateLimit(key);
       if (!rl.allowed) {
@@ -349,6 +370,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 改密码接口
     if (pathname === '/api/change-password' && req.method === 'POST') {
+      if (!isIpAllowed(getClientIp(req), getAdminAllowList())) { denyAdminIp(res, getClientIp(req), '改密码'); return; }
       const token = url.searchParams.get('token') || (req.headers['x-admin-token'] as string) || '';
       if (!isValidToken(token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -591,6 +613,12 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       return;
     }
     if (isBotUA(ua) || !isValidFp(fp)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    if (!isIpAllowed(getClientIp(req), getAdminAllowList())) {
+      auditLog({ event: 'admin_ip_deny', detail: `非白名单IP连WS`, ip: getClientIp(req), success: false });
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
