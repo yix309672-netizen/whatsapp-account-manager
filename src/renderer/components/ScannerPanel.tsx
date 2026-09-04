@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { Box, Text, Flex, VStack, HStack, Input, Textarea, Spinner } from '@chakra-ui/react';
 
 type TaskRow = { id:string; name:string; kind?:string; channel?:string; total:number; done:number; valid_count:number; invalid_count:number; status:string; created_at:number };
-type CheckerRow = { id:number; state:string; connected:boolean; taskId:string|null; hasQr:boolean };
+type CheckerRow = { id:number; state:string; connected:boolean; taskId:string|null; hasQr:boolean; banSuspect?:boolean; banReason?:string };
 
 export function ScannerPanel(): React.JSX.Element {
   const [status, setStatus] = useState<any>({ state:'close', connected:false });
@@ -90,6 +90,11 @@ export function ScannerPanel(): React.JSX.Element {
   const clearCheckerAuth = async (id:number) => {
     if(!confirm(`清除 checker #${id} 登录态，需重扫。确定？`)) return;
     try { await (window.api as any).invoke('checker:clear_auth', { id }); } catch(e:any){ alert(e.message||String(e)); }
+    refresh();
+  };
+  const unbanChecker = async (id:number) => {
+    if(!confirm(`解除 checker #${id} 的封号标记并恢复参与任务？（仅确认号正常/申诉通过后点）`)) return;
+    try { await (window.api as any).invoke('checker:unban', { id }); } catch(e:any){ alert(e.message||String(e)); }
     refresh();
   };
   const saveCheckerCount = async (n:number) => {
@@ -283,10 +288,16 @@ export function ScannerPanel(): React.JSX.Element {
           {checkers.map(c=>(
             <Box key={c.id} minW="200px" flex="1" bg="#F8FAFC" border="1px solid #E2E8F0" borderRadius="10px" p="10px">
               <HStack spacing="6px">
-                <Box w="8px" h="8px" borderRadius="full" bg={c.connected ? '#01B574' : c.state==='connecting' ? '#FFB547' : '#E53E3E'} />
+                <Box w="8px" h="8px" borderRadius="full" bg={c.banSuspect ? '#9B2C2C' : c.connected ? '#01B574' : c.state==='connecting' ? '#FFB547' : '#E53E3E'} />
                 <Text fontSize="12px" fontWeight="700">#{c.id}</Text>
-                <Text fontSize="11px" color="#718096">{c.connected ? '在线' : c.state==='connecting' ? '连接中' : '离线'}{c.taskId ? ` · 跑 ${c.taskId.slice(0,6)}` : ''}</Text>
+                <Text fontSize="11px" color={c.banSuspect ? '#C53030' : '#718096'}>{c.banSuspect ? '疑似被封（已隔离）' : c.connected ? '在线' : c.state==='connecting' ? '连接中' : '离线'}{c.taskId ? ` · 跑 ${c.taskId.slice(0,6)}` : ''}</Text>
               </HStack>
+              {c.banSuspect && (
+                <Box mt="6px" bg="#FFF5F5" border="1px solid #FEB2B2" borderRadius="6px" p="6px">
+                  <Text fontSize="10px" color="#C53030">🚫 {c.banReason || '疑似被封'}（不参与任务、不自动重连）</Text>
+                  <button onClick={()=>unbanChecker(c.id)} style={{marginTop:'6px', padding:'4px 10px', fontSize:'11px', borderRadius:'6px', background:'#C53030', color:'white', fontWeight:700}}>解除标记</button>
+                </Box>
+              )}
               {qrMap[c.id] ? (
                 <Box mt="8px" bg="white" p="6px" borderRadius="8px" textAlign="center">
                   {qrImgMap[c.id] ? <img src={qrImgMap[c.id]} alt={`QR-${c.id}`} style={{width:200, height:200, margin:'0 auto', display:'block', border:'1px solid #E2E8F0', borderRadius:8}} /> : <Spinner size="sm" color="#7551FF" />}

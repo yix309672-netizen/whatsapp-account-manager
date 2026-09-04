@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, rmSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../utils/db';
 import { logger } from '../utils/logger';
+import { auditLog } from '../utils/security';
 // 注意：必须静态导入。动态 require('../web/server') 在打包后相对路径不存在，
 // esbuild 会原样保留导致运行时 Cannot find module（被 try/catch 吞掉，Web 推送悄悄失效）
 import { broadcastWebEvent } from '../web/server';
@@ -27,6 +28,9 @@ interface Checker {
   currentTaskId: string | null;
   lastPairAt: number;
   presenceWaiters: Map<string, (p: { online: boolean; lastSeen: number }) => void>;
+  banSuspect: boolean;
+  banReason: string;
+  banAt: number;
 }
 const checkers = new Map<number, Checker>();
 function getChecker(id: number): Checker {
@@ -36,7 +40,16 @@ function getChecker(id: number): Checker {
       id, sock: null, connectionState: 'close', qrCache: '', wantConnection: false,
       reconnectTimer: null, consecutiveFailures: 0, windowStart: 0, windowCount: 0,
       currentTaskId: null, lastPairAt: 0, presenceWaiters: new Map(),
+      banSuspect: false, banReason: '', banAt: 0,
     };
+    // 启动时恢复持久化的封号标记（被标记的不自动重连、不参与分片）
+    try {
+      const row = getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(`checker_ban_${id}`) as { value: string } | undefined;
+      if (row?.value) {
+        const o = JSON.parse(row.value) as { reason?: string; at?: number };
+        c.banSuspect = true; c.banReason = String(o.reason || ''); c.banAt = Number(o.at) || 0;
+      }
+    } catch {}
     checkers.set(id, c);
   }
   return c;
@@ -78,23 +91,69 @@ export function setCheckerCount(n: number): number {
   logger.info(`[BaileysScanner] checker count set to ${v}`);
   return getCheckerCount();
 }
-export function listCheckers(): Array<{ id: number; state: string; connected: boolean; taskId: string | null; hasQr: boolean }> {
+export function listCheckers(): Array<{ id: number; state: string; connected: boolean; taskId: string | null; hasQr: boolean; banSuspect: boolean; banReason: string }> {
   const n = getCheckerCount();
-  const out: Array<{ id: number; state: string; connected: boolean; taskId: string | null; hasQr: boolean }> = [];
+  const out: Array<{ id: number; state: string; connected: boolean; taskId: string | null; hasQr: boolean; banSuspect: boolean; banReason: string }> = [];
   for (let i = 0; i < n; i++) {
     const c = getChecker(i);
-    out.push({ id: c.id, state: c.connectionState, connected: c.connectionState === 'open', taskId: c.currentTaskId, hasQr: !!c.qrCache });
+    out.push({ id: c.id, state: c.connectionState, connected: c.connectionState === 'open', taskId: c.currentTaskId, hasQr: !!c.qrCache, banSuspect: c.banSuspect, banReason: c.banReason });
   }
   return out;
 }
 export function setCheckerWantConnection(id: number, v: boolean): void {
   getChecker(id).wantConnection = v;
 }
+
+// ================== 封号监测 ==================
+// 协议没有"是否被封"接口，只能识别自有号的异常信号：
+//  - 强制下线 401/403 且报错含违规关键词（主动在手机上退出是纯 401 无关键词，不误伤）
+//  - 配对码/登录被拒含同样关键词；403 本身就罕见，直接视为可疑
+// 结论只是"疑似"，连上一次即自动洗白；隔离后不参与分片、不自动重连。
+const BAN_KEYWORDS = /ban(ned)?|violat|spam|abus|block(ed)?|restrict|forbidden|device[\s_-]*removed|封|违规|滥用|限制登录|unsupported/i;
+export function detectBanSignal(message: string, code: number | undefined): boolean {
+  const msg = String(message || '');
+  if (code === 403) return true;
+  if (code === 401 && BAN_KEYWORDS.test(msg)) return true;
+  return false;
+}
+function saveBanFlag(c: Checker): void {
+  try {
+    getDb().prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+      .run(`checker_ban_${c.id}`, JSON.stringify({ reason: c.banReason, at: c.banAt }), JSON.stringify({ reason: c.banReason, at: c.banAt }));
+  } catch {}
+}
+export function flagCheckerBanned(id: number, reason: string): { id: number; banSuspect: boolean; banReason: string } {
+  const c = getChecker(id);
+  if (!c.banSuspect) {
+    c.banSuspect = true;
+    c.banReason = String(reason || '').slice(0, 200);
+    c.banAt = Date.now();
+    saveBanFlag(c);
+    logger.warn(`[BaileysScanner] checker #${id} flagged ban-suspect: ${c.banReason}`);
+    auditLog({ event: 'checker_ban', detail: `checker #${id} 疑似被封: ${c.banReason}`, success: false });
+    broadcast('scanner:status', { state: c.connectionState, checkerId: id, banSuspect: true, banReason: c.banReason });
+  }
+  return { id, banSuspect: c.banSuspect, banReason: c.banReason };
+}
+export function unflagCheckerBanned(id: number): { id: number; banSuspect: boolean } {
+  const c = getChecker(id);
+  c.banSuspect = false; c.banReason = ''; c.banAt = 0;
+  try { getDb().prepare('DELETE FROM app_settings WHERE key=?').run(`checker_ban_${id}`); } catch {}
+  logger.info(`[BaileysScanner] checker #${id} ban-suspect cleared manually`);
+  auditLog({ event: 'checker_unban', detail: `checker #${id} 解除封号标记`, success: true });
+  broadcast('scanner:status', { state: c.connectionState, checkerId: id, banSuspect: false });
+  return { id, banSuspect: false };
+}
+export function isCheckerBanned(id: number): boolean {
+  return getChecker(id).banSuspect;
+}
 export function onlineCheckerIds(): number[] {
   const n = getCheckerCount();
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
     const c = getChecker(i);
+    // 被标记疑似被封的不参与分片（隔离保其他号 + 不浪费配额）
+    if (c.banSuspect) continue;
     if (c.sock && c.connectionState === 'open') out.push(i);
   }
   return out;
@@ -288,6 +347,16 @@ export async function startChecker(id: number): Promise<{ qr?: string; connected
         c.presenceWaiters.forEach((fn) => { try { fn({ online: false, lastSeen: 0 }); } catch {} });
         c.presenceWaiters.clear();
         c.consecutiveFailures++;
+        // 封号信号：401/403 + 违规关键词 → 标记隔离（不自动重连，避免空转撞墙）
+        {
+          const errMsg = String((lastDisconnect?.error as any)?.message || lastDisconnect?.error || '');
+          if (detectBanSignal(errMsg, code)) {
+            flagCheckerBanned(id, `强制下线 code=${code}：${errMsg.slice(0, 120)}`);
+            c.wantConnection = false;
+            broadcast('scanner:status', { state: 'close', code, checkerId: id, banSuspect: true, banReason: c.banReason, error: '疑似被封，已自动隔离（申诉/换号后点 解除）' });
+            return;
+          }
+        }
         if (loggedOut) {
           c.wantConnection = false;
           broadcast('scanner:status', { state: 'close', code, checkerId: id, error: '已退出登录，请清除授权后重扫' });
@@ -314,6 +383,11 @@ export async function startChecker(id: number): Promise<{ qr?: string; connected
         c.connectionState = 'open';
         c.qrCache = '';
         c.consecutiveFailures = 0;
+        // 自愈：能连上说明号是活的，误标记自动洗白
+        if (c.banSuspect) {
+          unflagCheckerBanned(id);
+          logger.info(`[BaileysScanner] checker #${id} ban-suspect auto-cleared on connect`);
+        }
         broadcast('scanner:status', { state: 'open', checkerId: id });
         logger.info(`[BaileysScanner] checker ${id} connected`);
       } else if (connection === 'connecting') {
@@ -902,6 +976,12 @@ export async function requestCheckerPairingCode(id: number, phone: string): Prom
   } catch (e: any) {
     const msg = String(e?.message || e);
     logger.error(`[BaileysScanner] checker ${id} pairingCode failed for ${clean}: ${msg}`);
+    // 配对被拒含违规信号 → 可能是号被封，标记隔离
+    const pcode = Number((e as any)?.output?.statusCode);
+    if (detectBanSignal(msg, Number.isFinite(pcode) ? pcode : undefined)) {
+      flagCheckerBanned(id, `配对被拒：${msg.slice(0, 120)}`);
+      throw new Error('该号码疑似被封（配对被拒），已自动隔离，申诉后点 解除');
+    }
     if (/Too many|rate|429|try again/i.test(msg)) throw new Error('WA 限流：pairingCode 请求过于频繁，请 1-2 分钟后再试');
     if (/Connection Closed|Terminated|not connected|not open|closed/i.test(msg)) throw new Error('通道刚断开重连中：请等二维码重新出现后再获码（约 3-5s）');
     throw new Error(`获取配对码失败：${msg.slice(0, 160)}`);

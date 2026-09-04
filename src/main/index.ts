@@ -108,6 +108,8 @@ async function initializeManager(): Promise<void> {
         for (let i = 0; i < n; i++) {
           const dir = i === 0 ? join(userData, 'baileys-auth') : join(userData, `baileys-auth-${i}`);
           if (!existsSync(join(dir, 'creds.json'))) continue;
+          // 疑似被封的不自动重连（避免空转撞墙），等人工 解除
+          try { if (m.isCheckerBanned(i)) { logger.warn(`checker #${i} ban-suspect, skip auto-reconnect`); continue; } } catch {}
           // wantConnection=true：掉线自动重连；若授权失效会出 QR，前端扫一次即可
           m.setCheckerWantConnection(i, true);
           await m.startChecker(i).catch((e: any) => logger.warn(`checker #${i} auto-reconnect failed:`, e?.message || e));

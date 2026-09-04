@@ -1114,6 +1114,11 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       clearCheckerAuth(id);
       return { success: true };
     }
+    case 'checker:unban': {
+      const id = Math.max(0, Math.floor(Number(params.id) || 0));
+      const { unflagCheckerBanned } = await import('../services/BaileysScanner');
+      return { success: true, ...unflagCheckerBanned(id) };
+    }
     case 'checker:pairing_code': {
       const id = Math.max(0, Math.floor(Number(params.id) || 0));
       const phone = String(params.phone || params.phoneNumber || '').trim();
