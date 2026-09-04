@@ -276,6 +276,13 @@ function runMigrations(): void {
     }
   } catch (err) { logger.warn('Migrate scanner_results columns failed:', err); }
 
+  // 开机对账：上次意外中断（重启/崩溃/断电）时 status 停留在 running 的任务全部改回 paused，
+  // 断点保留（结果行都在），点 开始 即从断点继续。每次启动都执行，幂等无害。
+  try {
+    const r = db.prepare("UPDATE scanner_tasks SET status='paused' WHERE status='running'").run();
+    if ((r.changes as number) > 0) logger.info(`Reconciled ${r.changes} interrupted scanner task(s) to paused`);
+  } catch (err) { logger.warn('Reconcile scanner tasks failed:', err); }
+
   // 迁移：scanner_tasks 新增 channel 列（pool=Checker池，web:<accountId>=管理器已登录账号直查）
   try {
     const chCols = db.prepare('PRAGMA table_info(scanner_tasks)').all() as Array<{ name: string }>;
