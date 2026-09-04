@@ -31,6 +31,9 @@ interface Checker {
   banSuspect: boolean;
   banReason: string;
   banAt: number;
+  cooldownUntil: number;   // 掉线/解封后的强制冷却到期时间（毫秒），到期前分片只睡觉不查号
+  closeCount: number;      // 近30分钟任务中掉线次数（连接不稳熔断用）
+  firstCloseAt: number;
 }
 const checkers = new Map<number, Checker>();
 function getChecker(id: number): Checker {
@@ -41,6 +44,7 @@ function getChecker(id: number): Checker {
       reconnectTimer: null, consecutiveFailures: 0, windowStart: 0, windowCount: 0,
       currentTaskId: null, lastPairAt: 0, presenceWaiters: new Map(),
       banSuspect: false, banReason: '', banAt: 0,
+      cooldownUntil: 0, closeCount: 0, firstCloseAt: 0,
     };
     // 启动时恢复持久化的封号标记（被标记的不自动重连、不参与分片）
     try {
@@ -138,6 +142,8 @@ export function flagCheckerBanned(id: number, reason: string): { id: number; ban
 export function unflagCheckerBanned(id: number): { id: number; banSuspect: boolean } {
   const c = getChecker(id);
   c.banSuspect = false; c.banReason = ''; c.banAt = 0;
+  // 人工解除后仍冷却 30 分钟再参战（刚被封过的号低调一点）
+  c.cooldownUntil = Date.now() + 30 * 60000;
   try { getDb().prepare('DELETE FROM app_settings WHERE key=?').run(`checker_ban_${id}`); } catch {}
   logger.info(`[BaileysScanner] checker #${id} ban-suspect cleared manually`);
   auditLog({ event: 'checker_unban', detail: `checker #${id} 解除封号标记`, success: true });
@@ -172,6 +178,14 @@ async function sleepInterruptible(ms: number): Promise<'done' | 'aborted'> {
   }
   return abortFlag ? 'aborted' : 'done';
 }
+// 强制冷却等待：cooldownUntil 到期前只睡觉不查号（掉线/解封后的保号期，可被中止打断）
+async function waitCooldown(c: Checker, taskId: string): Promise<boolean> {
+  const wait = c.cooldownUntil - Date.now();
+  if (wait <= 0) return true;
+  logger.info(`[BaileysScanner] task ${taskId} checker #${c.id} cooling down ${Math.round(wait / 1000)}s`);
+  if ((await sleepInterruptible(wait)) === 'aborted') { pauseTask(taskId); return false; }
+  return true;
+}
 // 查询超时保护：WA 偶发不回包，无超时会卡死整个任务
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -192,7 +206,7 @@ export interface ScanCfg {
   minMs: number; maxMs: number;       // 单号间隔区间
   batchSize: number;                  // 每批多少号后休眠
   batchRestMinMs: number; batchRestMaxMs: number; // 批量休眠区间
-  hourlyCap: number;                  // 每个号每小时上限（0=不限）
+  hourlyCap: number;                  // 每个号每小时查询上限（0=不限；按实际请求折算：查号1+头像1+签名1）
   maxConsecErr: number;               // 连续失败熔断阈值
   checkAvatar: boolean;               // 是否检测头像（多一次请求，慢约1倍）
   checkStatusMsg: boolean;            // 是否读取个性签名 about（多一次 USync 查询；对方设隐私不可见则为空）
@@ -203,9 +217,9 @@ export interface ScanCfg {
   presenceCacheDays: number;          // 活跃度：缓存天数（0=每次都重查，默认7）
 }
 export const SCAN_PRESETS: Record<Exclude<ScanMode, 'custom'>, Omit<ScanCfg, 'mode'>> = {
-  stealth:  { minMs: 8000, maxMs: 15000, batchSize: 20, batchRestMinMs: 120000, batchRestMaxMs: 240000, hourlyCap: 300,  maxConsecErr: 3, checkAvatar: true, checkStatusMsg: true, retryRounds: 2, retryCooldownMs: 120000, presenceGapMs: 5000, presenceTimeoutMs: 12000, presenceCacheDays: 7 },
-  balanced: { minMs: 4000, maxMs: 8000,  batchSize: 25, batchRestMinMs: 60000,  batchRestMaxMs: 120000, hourlyCap: 800,  maxConsecErr: 5, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 3000, presenceTimeoutMs: 10000, presenceCacheDays: 7 },
-  fast:     { minMs: 2000, maxMs: 4000,  batchSize: 30, batchRestMinMs: 30000,  batchRestMaxMs: 60000,  hourlyCap: 1500, maxConsecErr: 8, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 2000, presenceTimeoutMs: 8000, presenceCacheDays: 7 },
+  stealth:  { minMs: 8000, maxMs: 15000, batchSize: 20, batchRestMinMs: 120000, batchRestMaxMs: 240000, hourlyCap: 600,  maxConsecErr: 3, checkAvatar: true, checkStatusMsg: true, retryRounds: 2, retryCooldownMs: 120000, presenceGapMs: 5000, presenceTimeoutMs: 12000, presenceCacheDays: 7 },
+  balanced: { minMs: 4000, maxMs: 8000,  batchSize: 25, batchRestMinMs: 60000,  batchRestMaxMs: 120000, hourlyCap: 1500, maxConsecErr: 5, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 3000, presenceTimeoutMs: 10000, presenceCacheDays: 7 },
+  fast:     { minMs: 2000, maxMs: 4000,  batchSize: 30, batchRestMinMs: 30000,  batchRestMaxMs: 60000,  hourlyCap: 3000, maxConsecErr: 8, checkAvatar: true, checkStatusMsg: true, retryRounds: 1, retryCooldownMs: 60000, presenceGapMs: 2000, presenceTimeoutMs: 8000, presenceCacheDays: 7 },
 };
 export const SCAN_DEFAULTS: ScanCfg = { mode: 'balanced', ...SCAN_PRESETS.balanced };
 const SCAN_CFG_KEY = 'scanner_cfg';
@@ -217,12 +231,13 @@ export function getScanCfg(): ScanCfg {
       const saved = JSON.parse(row.value) as Partial<ScanCfg>;
       const cfg: ScanCfg = { ...SCAN_DEFAULTS, ...saved };
       // 钳制到安全范围，防止手填离谱值把号搞封
-      cfg.minMs = Math.min(Math.max(1500, Math.floor(Number(cfg.minMs) || 0)), 60000);
+      // 钳制到安全范围（2026-09-04 封号复盘后收紧：批量≤50、间隔≥2s、上限按查询次数≤3000）
+      cfg.minMs = Math.min(Math.max(2000, Math.floor(Number(cfg.minMs) || 0)), 60000);
       cfg.maxMs = Math.min(Math.max(cfg.minMs, Math.floor(Number(cfg.maxMs) || 0)), 120000);
-      cfg.batchSize = Math.min(Math.max(5, Math.floor(Number(cfg.batchSize) || 0)), 100);
+      cfg.batchSize = Math.min(Math.max(5, Math.floor(Number(cfg.batchSize) || 0)), 50);
       cfg.batchRestMinMs = Math.min(Math.max(10000, Math.floor(Number(cfg.batchRestMinMs) || 0)), 600000);
       cfg.batchRestMaxMs = Math.min(Math.max(cfg.batchRestMinMs, Math.floor(Number(cfg.batchRestMaxMs) || 0)), 900000);
-      cfg.hourlyCap = Math.min(Math.max(0, Math.floor(Number(cfg.hourlyCap) || 0)), 5000);
+      cfg.hourlyCap = Math.min(Math.max(0, Math.floor(Number(cfg.hourlyCap) || 0)), 3000);
       cfg.maxConsecErr = Math.min(Math.max(2, Math.floor(Number(cfg.maxConsecErr) || 0)), 20);
       cfg.checkAvatar = cfg.checkAvatar !== false;
       cfg.checkStatusMsg = (cfg as any).checkStatusMsg !== false;
@@ -364,6 +379,19 @@ export async function startChecker(id: number): Promise<{ qr?: string; connected
           broadcast('scanner:status', { state: 'close', code, checkerId: id, error: '已退出登录，请清除授权后重扫' });
           return;
         }
+        // 任务中掉线：强制冷却 5 分钟（掉线本身就是被盯上的信号，满速续跑等于找封）+
+        // 30 分钟内掉 3 次直接熔断整个任务（不断点，点 开始 继续）
+        if (c.currentTaskId) {
+          c.cooldownUntil = Date.now() + 5 * 60000;
+          const now = Date.now();
+          if (!c.firstCloseAt || now - c.firstCloseAt > 30 * 60000) { c.firstCloseAt = now; c.closeCount = 0; }
+          c.closeCount++;
+          logger.warn(`[BaileysScanner] checker #${id} dropped during task (close #${c.closeCount}/30min), cooldown 5min`);
+          if (c.closeCount >= 3) {
+            pauseTask(c.currentTaskId, `checker #${id} 30分钟内掉线 ${c.closeCount} 次，连接极不稳定（疑似被限流），已自动暂停，冷却后再点 开始 继续`);
+            c.closeCount = 0;
+          }
+        }
         // 用户期望连接（正在扫码/等配对码）或有任务在跑：自动重连刷新 QR
         if ((c.wantConnection || c.currentTaskId) && !abortFlag && c.consecutiveFailures <= 10) {
           broadcast('scanner:status', { state: 'connecting', code, checkerId: id, retrying: true });
@@ -385,6 +413,7 @@ export async function startChecker(id: number): Promise<{ qr?: string; connected
         c.connectionState = 'open';
         c.qrCache = '';
         c.consecutiveFailures = 0;
+        c.closeCount = 0; c.firstCloseAt = 0;
         // 自愈：能连上说明号是活的，误标记自动洗白
         if (c.banSuspect) {
           unflagCheckerBanned(id);
@@ -522,19 +551,21 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
   const retryQueue: Array<{ raw: string; rid: string }> = [];
   let shardDone = 0;
 
-  const processOne = async (raw: string): Promise<{ ok: boolean; err?: string }> => {
+  const processOne = async (raw: string): Promise<{ ok: boolean; err?: string; queries: number }> => {
     let r: { exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string; statusMsg: string };
     try {
       r = await checkOne(c, raw, cfg);
     } catch (e: any) {
-      return { ok: false, err: String(e?.message || e).slice(0, 200) };
+      return { ok: false, err: String(e?.message || e).slice(0, 200), queries: 1 };
     }
+    // 按实际请求折算配额：查号1 + 头像1 + 签名1（只计实际发出的）
+    const queries = 1 + (r.exists && cfg.checkAvatar ? 1 : 0) + (r.exists && cfg.checkStatusMsg ? 1 : 0);
     const rid = uuidv4();
     db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
       .run(rid, taskId, raw, r.jid, r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', '', Math.floor(Date.now() / 1000));
     db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
       .run(r.exists ? 1 : 0, r.exists ? 0 : 1, taskId);
-    return { ok: true };
+    return { ok: true, queries };
   };
 
   for (let i = 0; i < phones.length; i++) {
@@ -553,8 +584,9 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
       }
     }
     const raw = phones[i];
+    if (!(await waitCooldown(c, taskId))) return;
     const res = await processOne(raw);
-    c.windowCount++;
+    c.windowCount += res.queries || 1;
     if (!res.ok) {
       // 失败记一行（供补查），计数照常 +1（done 含失败，避免 resume 死循环）
       const rid = uuidv4();
@@ -607,9 +639,10 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
         await delay(1000);
         if (abortFlag) return;
       }
-      c.windowCount++;
+      if (!(await waitCooldown(c, taskId))) return;
       try {
         const r = await checkOne(c, item.raw, cfg);
+        c.windowCount += 1 + (r.exists && cfg.checkAvatar ? 1 : 0) + (r.exists && cfg.checkStatusMsg ? 1 : 0);
         const old = db.prepare('SELECT exists_flag FROM scanner_results WHERE id=?').get(item.rid) as any;
         db.prepare('UPDATE scanner_results SET exists_flag=?, has_avatar=?, avatar_url=?, status_msg=?, error=?, jid=? WHERE id=?')
           .run(r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', r.jid, item.rid);
@@ -619,6 +652,7 @@ async function runRegisterShard(checkerId: number, taskId: string, phones: strin
         const p = await readTaskProgress(taskId);
         broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: item.raw, exists: r.exists, hasAvatar: r.hasAvatar, checkerId, retryRound: round });
       } catch (e: any) {
+        c.windowCount += 1;
         const msg = String(e?.message || e).slice(0, 200);
         db.prepare('UPDATE scanner_results SET error=? WHERE id=?').run(msg, item.rid);
         if (round >= cfg.retryRounds) {
@@ -699,11 +733,21 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
     const queue = numbers.map((p) => String(p).replace(/[^0-9]/g, '')).filter((p) => p && !existing.has(p));
     const cfg = getScanCfg();
     logger.info(`[BaileysScanner] task ${taskId} start kind=register channel=web, ${queue.length} pending (total ${numbers.length})`);
+    // Web 通道也有独立小时窗口（与 checker 池隔离；官方客户端同样怕刷太快）
+    let webStart = 0; let webCount = 0;
     for (let i = 0; i < queue.length; i++) {
       if (abortFlag) { pauseTask(taskId); return; }
       while (paused) {
         await delay(1000);
         if (abortFlag) return;
+      }
+      if (cfg.hourlyCap > 0) {
+        const nowH = Date.now();
+        if (!webStart || nowH - webStart >= 3600000) { webStart = nowH; webCount = 0; }
+        if (webCount >= cfg.hourlyCap) {
+          pauseTask(taskId, `Web 通道触发小时查询上限（${cfg.hourlyCap}/时），已自动暂停，冷却后点 开始 继续（断点保留）`);
+          return;
+        }
       }
       const raw = queue[i];
       const jid = `${raw}@c.us`;
@@ -753,6 +797,8 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
       } catch (e: any) {
         error = String(e?.message || e).slice(0, 200);
       }
+      // Web 通道同样按实际请求折算配额
+      webCount += 1 + (exists && cfg.checkAvatar && avatarUrl ? 1 : 0) + (exists && cfg.checkStatusMsg && statusMsg ? 1 : 0);
       const rid = uuidv4();
       db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
         .run(rid, taskId, raw, outJid, exists ? 1 : 0, hasAvatar ? 1 : 0, avatarUrl, statusMsg, pushname, error, Math.floor(Date.now() / 1000));
@@ -841,6 +887,7 @@ async function runPresenceShard(checkerId: number, taskId: string, phones: strin
       }
     }
     const raw = phones[i];
+    if (!(await waitCooldown(c, taskId))) return;
     let status = 'hidden';
     let lastSeen = 0;
     let jid = `${raw}@s.whatsapp.net`;
@@ -852,7 +899,8 @@ async function runPresenceShard(checkerId: number, taskId: string, phones: strin
       error = String(e?.message || e).slice(0, 200);
       status = 'error';
     }
-    c.windowCount++;
+    // 活跃度按 2 次请求折算（查号 + presence 订阅）
+    c.windowCount += 2;
     const rid = uuidv4();
     const nowSec = Math.floor(Date.now() / 1000);
     db.prepare(`INSERT INTO presence_results (id, task_id, phone, jid, status, last_seen, checker_id, error, created_at) VALUES (?,?,?,?,?,?,?,?,?)`)

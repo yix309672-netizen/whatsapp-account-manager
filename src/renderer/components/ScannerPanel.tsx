@@ -229,7 +229,7 @@ export function ScannerPanel(): React.JSX.Element {
             ))}
           </HStack>
         </Flex>
-        <Text fontSize="10px" color="#718096" mt="4px">隐身 8~15s/号·最稳（主号/大批量）｜均衡 4~8s/号·推荐｜极速 2~4s/号·仅小号短期用。熔断/小时上限触发会自动暂停，需手动继续。</Text>
+          <Text fontSize="10px" color="#718096" mt="4px">隐身 8~15s/号·最稳（主号/大批量）｜均衡 4~8s/号·推荐｜极速 2~4s/号·仅小号短期用。熔断/小时上限/连续掉线触发会自动暂停，需手动继续。掉线后强制冷却5分钟，封号标记号自动隔离。</Text>
         <Flex mt="8px" gap="8px" wrap="wrap" align="center">
           <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">间隔</Text>
             <Input value={Math.round(cfg.minMs/1000)} onChange={(e)=>upd({minMs:Number(e.target.value)*1000})} size="xs" width="52px" type="number" />
@@ -243,9 +243,9 @@ export function ScannerPanel(): React.JSX.Element {
             <Text fontSize="11px">~</Text>
             <Input value={Math.round(cfg.batchRestMaxMs/1000)} onChange={(e)=>upd({batchRestMaxMs:Number(e.target.value)*1000})} size="xs" width="56px" type="number" />
             <Text fontSize="11px" color="#718096">秒</Text></HStack>
-          <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">小时上限</Text>
+          <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">小时查询上限</Text>
             <Input value={cfg.hourlyCap} onChange={(e)=>upd({hourlyCap:Number(e.target.value)})} size="xs" width="64px" type="number" />
-            <Text fontSize="11px" color="#718096">号（0=不限）</Text></HStack>
+            <Text fontSize="11px" color="#718096">次（0=不限；查号1+头像1+签名1折算）</Text></HStack>
           <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">连错熔断</Text>
             <Input value={cfg.maxConsecErr} onChange={(e)=>upd({maxConsecErr:Number(e.target.value)})} size="xs" width="52px" type="number" />
             <Text fontSize="11px" color="#718096">次</Text></HStack>
