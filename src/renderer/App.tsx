@@ -7,8 +7,11 @@ import { EmployeePanel } from './components/EmployeePanel';
 import { StatsPanel } from './components/StatsPanel';
 import { TemplatesPanel } from './components/TemplatesPanel';
 import { PendingAccountsPanel } from './components/PendingAccountsPanel';
+import { ScannerPanel } from './components/ScannerPanel';
+import { LeafPanel } from './components/LeafPanel';
+import { ChatPanel } from './components/ChatPanel';
 
-type Tab = 'accounts' | 'pending' | 'employees' | 'stats' | 'templates';
+type Tab = 'accounts' | 'pending' | 'employees' | 'stats' | 'templates' | 'scanner' | 'leafgen' | 'service';
 
 const tabMeta: Record<Tab, { label: string }> = {
   accounts: { label: '账号管理' },
@@ -16,6 +19,9 @@ const tabMeta: Record<Tab, { label: string }> = {
   employees: { label: '员工管理' },
   stats: { label: '流量统计' },
   templates: { label: '前端管理' },
+  scanner: { label: '筛号' },
+  leafgen: { label: '号码生成' },
+  service: { label: '客服' },
 };
 
 const filterMeta: Record<'all' | 'online' | 'offline', { label: string }> = {
@@ -78,10 +84,7 @@ export default function App(): React.JSX.Element {
         <VStack align="stretch" spacing="0" flex="1">
           <Box mb="34px">
             <Text fontSize="24px" fontWeight="800" color="#2B3674" letterSpacing="-0.5px">
-              WhatsApp
-            </Text>
-            <Text fontSize="13px" fontWeight="700" color="#7551FF" mt="-2px">
-              安全中心
+              Mey❤
             </Text>
             <Text fontSize="11px" color="#A0AEC0" mt="10px">
               v{appVersion}
@@ -143,10 +146,10 @@ export default function App(): React.JSX.Element {
               </HStack>
             </Box>
 
-            <HStack spacing="10px">
-              <Flex display={{ base: 'flex', xl: 'none' }} gap="6px" flexWrap="wrap">
-                {(Object.keys(tabMeta) as Tab[]).slice(0, 3).map((t) => (
-                  <button key={t} onClick={() => setTab(t)} style={{ padding: '8px 12px', fontSize: '11px', borderRadius: '12px', border: '1px solid #E2E8F0', background: tab === t ? '#7551FF' : 'white', color: tab === t ? 'white' : '#707EAE' }}>
+            <HStack spacing="10px" flexWrap="wrap" rowGap="8px">
+              <Flex display={{ base: 'flex', xl: 'none' }} gap="6px" flexWrap="nowrap" overflowX="auto" maxW="100%" pb="2px" style={{ WebkitOverflowScrolling: 'touch' }}>
+                {(Object.keys(tabMeta) as Tab[]).map((t) => (
+                  <button key={t} onClick={() => setTab(t)} style={{ padding: '8px 12px', fontSize: '11px', borderRadius: '12px', border: '1px solid #E2E8F0', background: tab === t ? '#7551FF' : 'white', color: tab === t ? 'white' : '#707EAE', whiteSpace: 'nowrap', flexShrink: 0 }}>
                     {tabMeta[t].label}
                   </button>
                 ))}
@@ -192,6 +195,12 @@ export default function App(): React.JSX.Element {
             <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><StatsPanel /></Box>
           ) : tab === 'templates' ? (
             <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><TemplatesPanel /></Box>
+          ) : tab === 'scanner' ? (
+            <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><ScannerPanel /></Box>
+          ) : tab === 'leafgen' ? (
+            <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><LeafPanel /></Box>
+          ) : tab === 'service' ? (
+            <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><ChatPanel /></Box>
           ) : loading ? (
             <Flex justify="center" py="80px"><Spinner color="#7551FF" size="lg" thickness="3px" speed="0.7s" /></Flex>
           ) : filtered.length === 0 ? (

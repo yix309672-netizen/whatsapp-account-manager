@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, ipcMain } from 'electron';
 import { join } from 'path';
 import { initDatabase } from './utils/db';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
@@ -62,6 +62,11 @@ async function initializeManager(): Promise<void> {
     return;
   }
 
+  // 桌面渲染兜底：通用命令透传（当前管理端无窗口，仅防回归；Web 走 WS）
+  ipcMain.handle('__invoke__', (_e, method: string, params?: Record<string, unknown>) =>
+    handleCommand({ sessionManager }, String(method || ''), (params || {}) as Record<string, unknown>)
+  );
+
   // 管理中心已纯 Web 化，不再创建 BrowserWindow/Tray
   cleanupStaleChrome();
   await initDatabase();
@@ -90,6 +95,28 @@ async function initializeManager(): Promise<void> {
   // handleCommand({ sessionManager }, 'system:auto_restore', {}).catch((err) => {
   //   logger.error('Auto-restore failed:', err);
   // });
+
+  // Checker 池自动重连：有授权文件的 checker 静默连回（免扫码；失效则出二维码等扫，不阻塞启动）
+  setTimeout(() => {
+    import('./services/BaileysScanner').then(async (m) => {
+      try {
+        const { existsSync } = await import('fs');
+        const { join } = await import('path');
+        const userData = app.getPath('userData');
+        const n = m.getCheckerCount();
+        for (let i = 0; i < n; i++) {
+          const dir = i === 0 ? join(userData, 'baileys-auth') : join(userData, `baileys-auth-${i}`);
+          if (!existsSync(join(dir, 'creds.json'))) continue;
+          // wantConnection=true：掉线自动重连；若授权失效会出 QR，前端扫一次即可
+          m.setCheckerWantConnection(i, true);
+          await m.startChecker(i).catch((e: any) => logger.warn(`checker #${i} auto-reconnect failed:`, e?.message || e));
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+      } catch (e) {
+        logger.warn('checker auto-reconnect init failed:', e);
+      }
+    }).catch((e) => logger.warn('checker auto-reconnect import failed:', e));
+  }, 8000);
 }
 
 app.on('window-all-closed', () => {

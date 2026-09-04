@@ -7,6 +7,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { relayPushEvent } from './RelayClient';
 import { getAccountOwner, getEmployeeClientIdForAccount } from '../commands';
 import { closeBlankTabs } from './ChromeLauncher';
+// 注意：必须静态导入。动态 require('../web/server') 在打包后相对路径不存在，
+// esbuild 会原样保留导致运行时 Cannot find module（被 try/catch 吞掉，Web 推送悄悄失效）
+import { broadcastWebEvent } from '../web/server';
 
 interface SessionInfo {
   client: Client;
@@ -97,37 +100,42 @@ export class WhatsAppSessionManager {
     };
     this.sessions.set(accountId, sessionInfo);
 
-    client.on('qr', (qr) => {
+    // 清扫多余标签（about:blank/新标签页/重复 web 页），只留一个 WhatsApp。
+    // wwebjs 用 browserWSEndpoint 时必 newPage()，空白页不可能被复用，只能事后关。
+    const sweep = async (reason: string): Promise<void> => {
+      if (!sessionInfo.chromePort) {
+        logger.warn(`sweepBlankTabs skipped for ${accountId}: no chromePort (${reason})`);
+        return;
+      }
+      const n = await closeBlankTabs(sessionInfo.chromePort).catch(() => -1);
+      if (n === 0) logger.info(`sweepBlankTabs for ${accountId}: already clean (${reason})`);
+    };
+
+    client.on('qr', async (qr) => {
       sessionInfo.status = 'qr_pending';
       sessionInfo.qrCode = qr;
       this.emitAccountEvent('account:qr', { accountId, qr });
+      await sweep('qr');
     });
 
-    client.on('code', (code) => {
+    client.on('code', async (code) => {
       sessionInfo.status = 'qr_pending';
       sessionInfo.pairingCode = code;
       this.emitAccountEvent('account:pairing_code', { accountId, code });
+      await sweep('pairing-code');
     });
 
-    client.on('authenticated', () => {
+    client.on('authenticated', async () => {
       sessionInfo.status = 'authenticated';
       this.emitAccountEvent('account:authenticated', { accountId });
+      await sweep('authenticated');
     });
 
     client.on('ready', async () => {
       sessionInfo.status = 'ready';
       this.updateAccountStatus(accountId, 'online');
       this.emitAccountEvent('account:ready', { accountId });
-
-      // 关闭启动时遗留的 about:blank 空白标签页，只保留 WhatsApp Web
-      try {
-        // 方式一：通过 CDP HTTP 接口关闭（最可靠）
-        if (sessionInfo.chromePort) {
-          await closeBlankTabs(sessionInfo.chromePort);
-        }
-      } catch (err) {
-        logger.debug(`Cleanup blank tabs (cdp) failed for ${accountId}:`, err);
-      }
+      await sweep('ready');
     });
 
     client.on('disconnected', (reason) => {
@@ -147,6 +155,18 @@ export class WhatsAppSessionManager {
       this.updateAccountStatus(accountId, 'offline');
       this.emitAccountEvent('account:auth_failure', { accountId, message: msg });
     });
+
+    // 延时兜底清扫：页面创建有延迟的话，事件时点的清扫可能扑空，5s/15s 后再扫两遍
+    for (const ms of [5000, 15000]) {
+      setTimeout(() => {
+        const s = this.sessions.get(accountId);
+        if (!s || !s.chromePort) return;
+        if (s.status === 'disconnected' || s.status === 'failed') return;
+        closeBlankTabs(s.chromePort)
+          .then((n) => { if (n > 0) logger.info(`delayed sweep for ${accountId} closed ${n} tab(s) after ${ms}ms`); })
+          .catch(() => {});
+      }, ms);
+    }
 
     try {
       await client.initialize();
@@ -266,7 +286,7 @@ export class WhatsAppSessionManager {
         if (info.status !== 'ready' && info.status !== 'authenticated') continue;
         // 检查 client 是否仍然有效（WhatsApp Web 内部状态）
         try {
-          const info2 = info as Record<string, unknown>;
+          const info2 = info as unknown as Record<string, unknown>;
           // whatsapp-web.js Client 有 info.page 属性，如果页面已关闭则需要重连
           const client = info.client as unknown as Record<string, unknown>;
           const page = client.page as Record<string, unknown> | undefined;
@@ -362,8 +382,7 @@ export class WhatsAppSessionManager {
     });
     // Web 管理后台广播
     try {
-      const { broadcastWebEvent } = require('../web/server');
-      if (typeof broadcastWebEvent === 'function') broadcastWebEvent(channel, data);
+      broadcastWebEvent(channel, data);
     } catch { /* web 未启动时忽略 */ }
     // 中转端：只推送给创建该账号的网页客户端或拥有该账号的员工端，避免广播给所有绑定者
     const accountId = data.accountId as string | undefined;

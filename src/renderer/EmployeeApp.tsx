@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Account } from './types';
 import { formatPhone } from './utils/formatPhone';
+import w75Bg from './assets/w75-m.webp';
 
 interface EmployeeInfo {
   id: string;
@@ -58,13 +59,33 @@ function EmployeeApp(): React.JSX.Element {
   const [busyKey, setBusyKey] = useState('');
   const [appVersion, setAppVersion] = useState('');
   const [page, setPage] = useState(1);
+  // 中转/管理器连接态：online 以中转确认为准（null=确认中）
+  const [relay, setRelay] = useState<{ connected: boolean; bound: boolean; online: boolean | null }>({
+    connected: false,
+    bound: false,
+    online: null
+  });
 
   useEffect(() => {
     window.api.app.version().then((v: unknown) => setAppVersion(String(v))).catch(() => {});
+    // 用已保存的接入配置连接（主进程启动时已自动连过一次，这里做兜底 + 状态同步）
     window.api.employee
-      .connect('wss://waam-relay.yix309672.workers.dev/ws', 'RAMSG5LDRX5Z')
+      .getConfig()
+      .then((cfg: unknown) => {
+        const c = cfg as { serverUrl?: string; code?: string };
+        const url = (c?.serverUrl || '').trim() || 'wss://waam-relay.yix309672.workers.dev/ws';
+        const code = (c?.code || '').trim() || 'RAMSG5LDRX5Z';
+        return window.api.employee.connect(url, code);
+      })
+      .catch(() => {});
+    window.api.employee
+      .status()
+      .then((s: unknown) => setRelay(s as { connected: boolean; bound: boolean; online: boolean | null }))
       .catch(() => {});
     const offs = [
+      window.api.on('employee:relay_status', (data: unknown) => {
+        setRelay(data as { connected: boolean; bound: boolean; online: boolean | null });
+      }),
       window.api.on('account:pairing_code', (data: unknown) => {
         const d = data as { accountId: string; code: string };
         setAccounts((prev) =>
@@ -93,8 +114,20 @@ function EmployeeApp(): React.JSX.Element {
     return () => offs.forEach((off) => off());
   }, []);
 
+  const relayHint =
+    relay.online === true
+      ? ''
+      : relay.online === false
+        ? '管理器离线：请确认管理端在线及接入码一致，连接恢复后自动解除'
+        : '正在确认管理器状态…';
+  const canLogin = relay.online === true && !busy && !!username && !!password;
+
   const handleLogin = async (): Promise<void> => {
     setError('');
+    if (relay.online !== true) {
+      setError('管理器离线，暂不能登录（等连接恢复）');
+      return;
+    }
     setBusy(true);
     try {
       const result = (await window.api.employee.login(username.trim(), password)) as {
@@ -149,78 +182,84 @@ function EmployeeApp(): React.JSX.Element {
   };
 
   return (
-    <div className="h-screen flex flex-col" style={{ background: 'linear-gradient(180deg, #E3F2FD 0%, #BBDEFB 50%, #E3F2FD 100%)' }}>
+    <div className="h-screen flex flex-col relative overflow-hidden">
       {step === 'login' ? (
-        <>
-          <header className="border-b px-6 py-3 flex items-center justify-center" style={{ backgroundColor: '#0093E0' }}>
-            <DoraemonFace size={28} />
+        <div className="relative flex-1 flex flex-col min-h-0">
+          {/* 古风背景 w75-m.webp 微动 */}
+          <div
+            className="absolute inset-0 bg-cover animate-[w75Pan_22s_ease-in-out_infinite]"
+            style={{ backgroundImage: `url(${w75Bg})`, backgroundPosition: 'center top', filter: 'brightness(0.45) saturate(1.08)' }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/15 to-black/70" />
+          {/* 飘落粒子 */}
+          <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden>
+            <div className="w75-particles" />
+          </div>
+
+          <header className="relative z-10 border-b border-amber-500/20 px-6 py-3 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+            <span className="text-amber-100 font-bold tracking-[0.2em] text-sm">侠客行 · 员工阁</span>
           </header>
-          <main className="flex-1 overflow-y-auto flex items-center justify-center p-6">
+          <main className="relative z-10 flex-1 overflow-y-auto flex items-center justify-center p-6">
             {error && (
-              <div className="fixed top-16 left-1/2 -translate-x-1/2 bg-red-500 text-white px-4 py-2 rounded-full text-sm shadow-lg z-10">
+              <div className="fixed top-16 left-1/2 -translate-x-1/2 bg-red-500/90 text-white px-4 py-2 rounded-full text-sm shadow-lg z-20 backdrop-blur">
                 {error}
               </div>
             )}
-            <div className="w-80 rounded-3xl shadow-2xl p-8 text-center" style={{ backgroundColor: '#FFFFFF', border: '3px solid #0093E0' }}>
-              <div className="flex justify-center mb-4">
-                <DoraemonFace size={80} />
+            <div className="w-80 rounded-2xl shadow-[0_0_40px_rgba(0,0,0,0.5)] p-8 text-center bg-black/55 backdrop-blur-xl border border-amber-500/20">
+              <div className="flex justify-center mb-3">
+                <span className="text-2xl">⚔</span>
               </div>
-              <h2 className="text-xl font-bold mb-1" style={{ color: '#0093E0' }}>员工登录</h2>
-              <p className="text-xs text-gray-400 mb-6">请输入账号和密码</p>
-              <div className="flex flex-col gap-3">
+              <h2 className="text-xl font-bold tracking-widest text-amber-100 font-serif">侠客 · 登录</h2>
+              <p className="text-xs text-amber-200/60 mt-1 tracking-widest">EMPLOYEE SECURE LOGIN</p>
+              <p
+                className="text-xs mt-2 tracking-widest"
+                style={{ color: relay.online === true ? '#4ade80' : relay.online === false ? '#f87171' : '#fbbf24' }}
+              >
+                {relay.online === true ? '● 管理器在线' : relay.online === false ? '● 管理器离线' : '● 连接确认中…'}
+              </p>
+              <div className="flex flex-col gap-3 mt-6">
                 <input
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="账号"
-                  className="w-full px-4 py-2.5 text-sm rounded-full bg-blue-50 focus:outline-none focus:ring-2 transition-all"
-                  style={{ border: '2px solid #BBDEFB' }}
+                  className="w-full px-4 py-2.5 text-sm rounded-lg bg-black/40 border border-amber-500/20 text-amber-50 placeholder:text-amber-200/40 focus:outline-none focus:border-amber-500/50 focus:shadow-[0_0_12px_rgba(217,119,6,0.25)] transition-all"
                 />
                 <input
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   type="password"
                   placeholder="密码"
-                  className="w-full px-4 py-2.5 text-sm rounded-full bg-blue-50 focus:outline-none focus:ring-2 transition-all"
-                  style={{ border: '2px solid #BBDEFB' }}
+                  className="w-full px-4 py-2.5 text-sm rounded-lg bg-black/40 border border-amber-500/20 text-amber-50 placeholder:text-amber-200/40 focus:outline-none focus:border-amber-500/50 focus:shadow-[0_0_12px_rgba(217,119,6,0.25)] transition-all"
                 />
+                {relayHint && <p className="text-xs text-amber-200/70 text-center">{relayHint}</p>}
                 <button
                   onClick={handleLogin}
-                  disabled={busy || !username || !password}
-                  className="w-full py-2.5 text-sm font-bold rounded-full text-white transition-all shadow-md hover:shadow-lg disabled:opacity-40"
-                  style={{ backgroundColor: '#0093E0' }}
-                  onMouseEnter={(e) => { (e.target as HTMLElement).style.backgroundColor = '#007ACC'; }}
-                  onMouseLeave={(e) => { (e.target as HTMLElement).style.backgroundColor = '#0093E0'; }}
+                  disabled={!canLogin}
+                  className="w-full py-2.5 text-sm font-bold rounded-lg text-black transition-all shadow-md disabled:opacity-40 tracking-[0.2em]"
+                  style={{ background: 'linear-gradient(90deg, #d97706, #f59e0b)' }}
                 >
-                  {busy ? '登录中…' : '登 录'}
+                  {busy ? '登录中…' : '剑 指 登 录'}
                 </button>
               </div>
             </div>
           </main>
-        </>
+          <style>{`@keyframes w75Pan{0%,100%{transform:scale(1) translateX(0)}25%{transform:scale(1.02) translateX(-0.8%)}50%{transform:scale(1.02) translateX(0.8%)}75%{transform:scale(1.01) translateX(-0.4%)}} .w75-particles{position:absolute;inset:0;overflow:hidden} .w75-particles::before{content:'✦ ❋ 叶 ◈'; position:absolute; left:10%; top:-10%; font-size:10px; color:rgba(251,191,36,0.5); animation: wFall 9s linear infinite} @keyframes wFall{0%{transform:translateY(-10vh)}100%{transform:translateY(110vh)}}`}</style>
+        </div>
       ) : (
-        <>
-          <header className="border-b px-4 py-2 flex items-center justify-between" style={{ backgroundColor: '#0093E0' }}>
+        <div className="flex-1 flex flex-col min-h-0 bg-[#0f0f0f] relative">
+          <div className="absolute inset-0 opacity-[0.08]" style={{ backgroundImage: `url(${w75Bg})`, backgroundSize: 'cover', backgroundPosition: 'center top', filter: 'blur(2px)' }} />
+          <header className="relative z-10 border-b border-amber-500/20 px-4 py-2.5 flex items-center justify-between bg-black/40 backdrop-blur">
             <div className="flex items-center gap-2">
-              <DoraemonFace size={24} />
-              <span className="text-white text-sm font-semibold">我的账号（{accounts.length}）</span>
+              <span className="text-amber-400 font-bold tracking-widest text-sm">侠客行</span>
+              <span className="text-amber-100/60 text-xs">· 我的账号（{accounts.length}）</span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-blue-100 text-xs">v{appVersion}</span>
-              <button
-                onClick={loadMyAccounts}
-                className="px-3 py-1 text-xs rounded-full bg-white/20 text-white hover:bg-white/30 transition-colors"
-              >
-                刷新
-              </button>
-              <button
-                onClick={() => { setEmployee(null); setStep('login'); }}
-                className="px-3 py-1 text-xs rounded-full bg-white/20 text-white hover:bg-white/30 transition-colors"
-              >
-                退出
-              </button>
+              <span className="text-amber-200/40 text-xs">v{appVersion}</span>
+              <button onClick={loadMyAccounts} className="px-3 py-1 text-xs rounded-full bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 border border-amber-500/20 transition-colors">刷新</button>
+              <button onClick={() => { setEmployee(null); setStep('login'); }} className="px-3 py-1 text-xs rounded-full bg-white/10 text-white hover:bg-white/15 transition-colors border border-white/10">退出</button>
             </div>
           </header>
-          <main className="flex-1 overflow-y-auto p-3">
+          <main className="relative z-10 flex-1 overflow-y-auto p-3">
             {error && (
               <div className="fixed top-12 left-1/2 -translate-x-1/2 bg-red-500 text-white px-4 py-1.5 rounded-full text-xs shadow-lg z-10">
                 {error}
@@ -316,7 +355,7 @@ function EmployeeApp(): React.JSX.Element {
               </>
             )}
           </main>
-        </>
+          </div>
       )}
     </div>
   );

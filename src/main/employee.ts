@@ -24,6 +24,8 @@ if (!gotLock) {
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let relay: EmployeeRelayClient | null = null;
+// 中转 worker 确认的管理器在线态（初始未知，走事件更新）
+let managerOnline: boolean | null = null;
 const sessionManager = new WhatsAppSessionManager();
 
 // 员工端自己的持久 clientId
@@ -50,17 +52,21 @@ function startRelay(serverUrl: string, code: string): void {
   }
   relay = new EmployeeRelayClient(serverUrl.trim(), code.trim().toUpperCase(), getClientId());
   relay.on('bound', (info) => {
+    if (typeof (info as { online?: unknown }).online === 'boolean') {
+      managerOnline = !!(info as { online?: boolean }).online;
+    }
     win?.webContents.send('employee:relay_status', {
       connected: !!relay?.isConnected,
       bound: relay?.isBound,
-      online: !!info.online
+      online: managerOnline
     });
   });
   relay.on('manager_status', (info) => {
+    managerOnline = !!(info as { online?: boolean }).online;
     win?.webContents.send('employee:relay_status', {
       connected: !!relay?.isConnected,
       bound: relay?.isBound,
-      online: !!info.online
+      online: managerOnline
     });
   });
   relay.on('event', (ev) => {
@@ -133,6 +139,15 @@ function registerEmployeeIpc(): void {
 
   ipcMain.handle('employee:get_config', () => {
     return loadRelaySettings();
+  });
+
+  ipcMain.handle('employee:status', () => {
+    return {
+      connected: !!relay?.isConnected,
+      bound: !!relay?.isBound,
+      // online 以中转 worker 确认为准；null=未知（等 employee:relay_status 事件）
+      online: managerOnline
+    };
   });
 
   ipcMain.handle('employee:login', async (_e, username: string, password: string) => {

@@ -249,11 +249,29 @@ export const webApi = {
     get: () => wsInvoke("template:get", {}),
     set: (template: string) => wsInvoke("template:set", { template }),
     publish: (template: string) => wsInvoke("template:publish", { template }),
+    publishStatus: () => wsInvoke("template:publish_status", {}),
   },
   settings: {
     get: () => wsInvoke("settings:get", {}),
     set: (entries: Record<string, string>) => wsInvoke("settings:set", { entries }),
   },
+  leaf: {
+    status: () => wsInvoke("leaf:status", {}),
+    tagAdd: (tag: string, step?: number, description?: string) => wsInvoke("leaf:tag_add", { tag, step, description }),
+    segment: (tag: string, count: number) => wsInvoke("leaf:segment", { tag, count }),
+    snowflake: (count: number) => wsInvoke("leaf:snowflake", { count }),
+    genPhones: (prefix: string, start: number, count: number) => wsInvoke("leaf:gen_phones", { prefix, start, count }),
+    genTask: (prefix: string, start: number, count: number, name?: string) => wsInvoke("leaf:gen_task", { prefix, start, count, name }),
+  },
+  chat: {
+    threads: () => wsInvoke("chat:threads", {}),
+    history: (phone: string, limit?: number) => wsInvoke("chat:history", { phone, limit }),
+    reply: (phone: string, content: string) => wsInvoke("chat:reply", { phone, content }),
+    markRead: (phone: string) => wsInvoke("chat:mark_read", { phone }),
+    remove: (phone: string) => wsInvoke("chat:delete", { phone }),
+  },
+  // 通用 invoke，供 scanner 等自定义命令使用（与 preload 的 window.api.invoke 对齐）
+  invoke: (method: string, params: Record<string, unknown> = {}) => wsInvoke(method, params),
   on: (channel: string, callback: (data: unknown) => void) => {
     let set = eventListeners.get(channel);
     if (!set) { set = new Set(); eventListeners.set(channel, set); }
@@ -276,12 +294,24 @@ export function installWebApi(): void {
   }
 }
 
-export async function loginAdmin(username: string, password: string): Promise<string> {
+export async function fetchCaptcha(): Promise<{ id: string; svg: string }> {
+  const fp = await collectBrowserFp();
+  const res = await fetch("/api/captcha", {
+    headers: { "X-Browser-Fp": fp, "X-Fingerprint": fp },
+  });
+  const data = await res.json().catch(() => ({})) as { ok?: boolean; id?: string; svg?: string; error?: string };
+  if (!res.ok || !data.ok || !data.id || !data.svg) {
+    throw new Error(data.error || "验证码获取失败");
+  }
+  return { id: data.id, svg: data.svg };
+}
+
+export async function loginAdmin(username: string, password: string, captchaId: string, captcha: string): Promise<string> {
   const fp = await collectBrowserFp();
   const res = await fetch("/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Browser-Fp": fp, "X-Fingerprint": fp },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, captchaId, captcha }),
   });
   const data = await res.json().catch(() => ({})) as { ok?: boolean; token?: string; error?: string };
   if (!res.ok || !data.ok || !data.token) {

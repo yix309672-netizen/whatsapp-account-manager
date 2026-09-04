@@ -34,6 +34,77 @@ function revokeToken(token: string): void {
   sessions.delete(token);
 }
 
+// ==================== 图形验证码（登录防护） ====================
+
+const CAPTCHA_TTL_MS = 5 * 60 * 1000; // 5 分钟
+const captchas = new Map<string, { text: string; exp: number }>();
+const CAPTCHA_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉易混淆 0O1l
+
+function makeCaptcha(): { id: string; text: string } {
+  let text = '';
+  const buf = randomBytes(4);
+  for (let i = 0; i < 4; i++) text += CAPTCHA_CHARS[buf[i] % CAPTCHA_CHARS.length];
+  const id = randomBytes(12).toString('hex');
+  captchas.set(id, { text, exp: Date.now() + CAPTCHA_TTL_MS });
+  if (captchas.size > 500) {
+    const oldest = [...captchas.entries()].sort((a, b) => a[1].exp - b[1].exp)[0];
+    if (oldest) captchas.delete(oldest[0]);
+  }
+  return { id, text };
+}
+
+function checkCaptcha(id: string, input: string): boolean {
+  const rec = captchas.get(String(id || ''));
+  captchas.delete(String(id || ''));
+  if (!rec || Date.now() > rec.exp) return false;
+  return rec.text === String(input || '').trim().toUpperCase();
+}
+
+// 聊天专用频率桶（固定窗口计数；登录限流器只记失败，不适用高频正常流量）
+const chatBuckets = new Map<string, { count: number; reset: number }>();
+function chatBucket(key: string, max: number, windowMs: number): boolean {
+  const now = Date.now();
+  const e = chatBuckets.get(key);
+  if (!e || now >= e.reset) {
+    chatBuckets.set(key, { count: 1, reset: now + windowMs });
+    if (chatBuckets.size > 5000) {
+      for (const [k, v] of chatBuckets) {
+        if (v.reset <= now) chatBuckets.delete(k);
+        if (chatBuckets.size <= 4000) break;
+      }
+    }
+    return true;
+  }
+  if (e.count >= max) return false;
+  e.count++;
+  return true;
+}
+
+function captchaSvg(text: string): string {
+  const w = 120;
+  const h = 44;
+  let chars = '';
+  for (let i = 0; i < text.length; i++) {
+    const x = 14 + i * 26;
+    const y = 30;
+    const rot = (randomBytes(1)[0] % 41) - 20;
+    const c = ['#b45309', '#92400e', '#78350f', '#451a03'][randomBytes(1)[0] % 4];
+    chars += `<text x="${x}" y="${y}" font-size="26" font-weight="bold" font-family="Georgia,serif" fill="${c}" transform="rotate(${rot} ${x} ${y})">${text[i]}</text>`;
+  }
+  let noise = '';
+  for (let i = 0; i < 5; i++) {
+    const x1 = randomBytes(1)[0] % w;
+    const y1 = randomBytes(1)[0] % h;
+    const x2 = randomBytes(1)[0] % w;
+    const y2 = randomBytes(1)[0] % h;
+    noise += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#d6a756" stroke-width="1" opacity="0.6"/>`;
+  }
+  for (let i = 0; i < 24; i++) {
+    noise += `<circle cx="${randomBytes(1)[0] % w}" cy="${randomBytes(1)[0] % h}" r="1" fill="#a16207" opacity="0.5"/>`;
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#fef3c7"/>${noise}${chars}</svg>`;
+}
+
 // ==================== 管理员账号密码（admin_users 表） ====================
 
 import { getDb } from '../utils/db';
@@ -179,7 +250,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     }
 
     // 静态资源与登录页本身放行指纹缺失，但 WS 与登录接口必须校验
-    const needFp = pathname === '/api/login' || pathname.startsWith('/ws') || req.headers.upgrade === 'websocket';
+    const needFp = pathname === '/api/login' || pathname === '/api/captcha' || pathname.startsWith('/ws') || req.headers.upgrade === 'websocket';
 
     // Bot 直接拦截（静态资源也拦截，避免爬虫拉取）
     if (isBotUA(ua)) {
@@ -210,6 +281,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       }
     }
 
+    // 验证码下发（登录页用，需浏览器指纹，防批量刷接口）
+    if (pathname === '/api/captcha' && req.method === 'GET') {
+      const { id, text } = makeCaptcha();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, id, svg: captchaSvg(text) }));
+      return;
+    }
+
     // 登录接口
     if (pathname === '/api/login' && req.method === 'POST') {
       const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
@@ -224,10 +303,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       const body = await readBody(req).catch(() => '');
       let username = '';
       let password = '';
+      let captchaId = '';
+      let captcha = '';
       try {
         const d = JSON.parse(body);
         username = String(d.username || '');
         password = String(d.password || '');
+        captchaId = String(d.captchaId || '');
+        captcha = String(d.captcha || '');
       } catch {
         username = '';
         password = '';
@@ -236,6 +319,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       if (!username || !password) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '请输入账号和密码' }));
+        return;
+      }
+
+      // 验证码先行校验（一次性，5分钟有效；防爆破）
+      if (!checkCaptcha(captchaId, captcha)) {
+        recordFailedAttempt(key);
+        auditLog({ event: 'web_login', detail: `验证码错误: ${username}`, ip, success: false });
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '验证码错误或已过期', needCaptcha: true }));
         return;
       }
 
@@ -288,22 +380,81 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     }
 
     // 公开配对接口（hotline 页提交号码 → 触发配对，获取 8 位配对码）
+    // 高并发 100：全局并发 20 + 80 排队 + IP/号码限流 + 重试
+    const pairingInflight = new Set<string>();
+    let pairingConcurrent = 0;
+    const PAIRING_MAX_CONCURRENT = 20;
+    const PAIRING_QUEUE_MAX = 80;
+    const pairingQueue: Array<{ phone: string; ip: string; resolve: (v: unknown) => void; reject: (e: Error) => void; start: number }> = [];
+    function processPairingQueue(): void {
+      while (pairingQueue.length > 0 && pairingConcurrent < PAIRING_MAX_CONCURRENT) {
+        const job = pairingQueue.shift()!;
+        if (Date.now() - job.start > 25000) { job.reject(new Error('排队超时，请重试')); continue; }
+        pairingConcurrent++;
+        pairingInflight.add(job.phone);
+        handleCommand({ sessionManager }, 'account:request_pairing_with_phone', { phoneNumber: job.phone })
+          .then((r) => job.resolve(r))
+          .catch((e) => job.reject(e))
+          .finally(() => { pairingConcurrent--; pairingInflight.delete(job.phone); processPairingQueue(); });
+      }
+    }
     if (pathname === '/api/request-pairing' && req.method === 'POST') {
+      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const fpPair = (req.headers['x-browser-fp'] as string) || (req.headers['x-fingerprint'] as string) || '';
+      // IP 3次/10s，号码 1次/8s
+      const ipKey = `pair_ip:${ip}`;
+      const ipRl = checkRateLimit(ipKey);
+      if (!ipRl.allowed) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '请求过于频繁，请稍后重试' }));
+        return;
+      }
       const body = await readBody(req).catch(() => '');
       let phone = '';
-      try { phone = String(JSON.parse(body).phone || ''); } catch { phone = ''; }
-      if (!phone) {
+      try { phone = String(JSON.parse(body).phone || '').replace(/[^0-9]/g,''); } catch { phone = ''; }
+      if (!phone || phone.length < 8) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '缺少手机号' }));
         return;
       }
+      const phoneKey = `pair_phone:${phone}`;
+      const phoneRl = checkRateLimit(phoneKey);
+      if (!phoneRl.allowed) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '该号码请求过于频繁，请稍后重试' }));
+        return;
+      }
+      // 去重：同一号码并发去重
+      if (pairingInflight.has(phone)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '该号码正在验证中，请稍候' }));
+        return;
+      }
+      if (pairingConcurrent >= PAIRING_MAX_CONCURRENT) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '系统繁忙，请稍后重试' }));
+        return;
+      }
+      pairingInflight.add(phone);
+      pairingConcurrent++;
       try {
         const result = await handleCommand({ sessionManager }, 'account:request_pairing_with_phone', { phoneNumber: phone });
+        // 号码级冷却 8s
+        setTimeout(()=>{},0);
+        recordFailedAttempt(phoneKey);
+        // 成功后清理限流桶避免误伤：用短 TTL 的 check 已足够，此处不额外 clear
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result));
       } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: (err as Error).message || String(err) }));
+        recordFailedAttempt(ipKey);
+        recordFailedAttempt(phoneKey);
+        const msg = (err as Error).message || String(err);
+        const code = /频繁|限流|繁忙|429/.test(msg) ? 429 : 500;
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: msg }));
+      } finally {
+        pairingInflight.delete(phone);
+        pairingConcurrent--;
       }
       return;
     }
@@ -327,6 +478,98 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       } catch (err) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, done: false, error: (err as Error).message || String(err) }));
+      }
+      return;
+    }
+
+    // 客服聊天：用户发送消息（公开接口，自带频率桶限流：单键10条/分，单IP 30条/分）
+    if (pathname === '/api/chat-send' && req.method === 'POST') {
+      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      if (!chatBucket(`chat_ip:${ip}`, 30, 60000)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '发送过于频繁，请稍后再试' }));
+        return;
+      }
+      const body = await readBody(req).catch(() => '');
+      let key = '';
+      let content = '';
+      let claim = '';
+      try {
+        const d = JSON.parse(body);
+        key = String(d.key || d.phone || '').trim().slice(0, 64);
+        content = String(d.content || '').trim().slice(0, 500);
+        claim = String(d.claim || '').trim().slice(0, 64);
+      } catch { key = ''; content = ''; }
+      if (!key || !content) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '缺少参数' }));
+        return;
+      }
+      if (!chatBucket(`chat_key:${key}`, 10, 60000)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '发送过于频繁，请稍后再试' }));
+        return;
+      }
+      try {
+        const db = getDb();
+        // 验证后认领：把访客消息并到手机号下
+        if (claim && claim !== key) {
+          db.prepare('UPDATE chat_messages SET phone = ? WHERE phone = ?').run(key, claim);
+        }
+        const r = db.prepare('INSERT INTO chat_messages (phone, sender, content) VALUES (?, ?, ?)')
+          .run(key, 'user', content);
+        try { broadcastWebEvent('chat:new_message', { phone: key, id: Number(r.lastInsertRowid) }); } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, id: Number(r.lastInsertRowid) }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '发送失败，请稍后重试' }));
+      }
+      return;
+    }
+
+    // 客服聊天：用户轮询新消息（含客服回复，单键120次/分）
+    if (pathname === '/api/chat-poll' && req.method === 'GET') {
+      const key = (url.searchParams.get('key') || url.searchParams.get('phone') || '').trim().slice(0, 64);
+      if (key && !chatBucket(`chat_poll:${key}`, 120, 60000)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '请求过于频繁' }));
+        return;
+      }
+      const since = Math.max(0, Number(url.searchParams.get('since') || 0));
+      if (!key) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '缺少参数' }));
+        return;
+      }
+      try {
+        const rows = getDb().prepare(
+          'SELECT id, sender, content, created_at FROM chat_messages WHERE phone = ? AND id > ? ORDER BY id ASC LIMIT 50'
+        ).all(key, since) as Array<{ id: number; sender: string; content: string; created_at: number }>;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, messages: rows }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '拉取失败' }));
+      }
+      return;
+    }
+
+    // 中转状态（H5 状态灯用，公开接口；仅返回连通性，不泄露 code/url；单IP 60次/分）
+    if (pathname === '/api/relay-status' && req.method === 'GET') {
+      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      if (!chatBucket(`relay_status:${ip}`, 60, 60000)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '请求过于频繁' }));
+        return;
+      }
+      try {
+        const st = await handleCommand({ sessionManager }, 'relay:status', {}) as { connected?: boolean; registered?: boolean };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, connected: !!st.connected, registered: !!st.registered }));
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '状态获取失败' }));
       }
       return;
     }

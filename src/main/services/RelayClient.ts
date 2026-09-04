@@ -25,6 +25,9 @@ export class RelayClient extends EventEmitter {
   private manualClose = false;
   private connected = false;
   private registered = false;
+  // 应用层心跳：25s 一次 ping，40s 无 pong 则判定半开并强制重连
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastPong = 0;
 
   constructor(config: RelayConfig, sessionManager: WhatsAppSessionManager) {
     super();
@@ -47,6 +50,7 @@ export class RelayClient extends EventEmitter {
 
   stop(): void {
     this.manualClose = true;
+    this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -78,6 +82,8 @@ export class RelayClient extends EventEmitter {
     this.ws.on('open', () => {
       logger.info(`Relay connected to ${wsUrl}`);
       this.setConnected(true);
+      this.lastPong = Date.now();
+      this.startHeartbeat();
       this.send({
         type: 'register',
         code: this.config.code
@@ -91,6 +97,7 @@ export class RelayClient extends EventEmitter {
     this.ws.on('close', () => {
       this.registered = false;
       this.setConnected(false);
+      this.stopHeartbeat();
       if (!this.manualClose) {
         logger.warn('Relay connection closed, reconnecting...');
         this.scheduleReconnect();
@@ -117,6 +124,30 @@ export class RelayClient extends EventEmitter {
     }, delay);
   }
 
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.manualClose || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - this.lastPong > 40000) {
+        logger.warn('Relay heartbeat timeout (no pong in 40s), forcing reconnect...');
+        try {
+          this.ws.terminate();
+        } catch {
+          // ignore; close 事件会触发重连
+        }
+        return;
+      }
+      this.send({ type: 'ping', t: Date.now() });
+    }, 25000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
   private setConnected(v: boolean): void {
     if (this.connected !== v) {
       this.connected = v;
@@ -139,6 +170,10 @@ export class RelayClient extends EventEmitter {
     }
 
     switch (msg.type) {
+      case 'pong': {
+        this.lastPong = Date.now();
+        break;
+      }
       case 'registered': {
         const ok = !!msg.ok;
         this.registered = ok;

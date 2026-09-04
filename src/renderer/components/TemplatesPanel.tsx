@@ -50,7 +50,7 @@ export function TemplatesPanel(): React.JSX.Element {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [published, setPublished] = useState(false);
+  const [publishInfo, setPublishInfo] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -79,14 +79,40 @@ export function TemplatesPanel(): React.JSX.Element {
     }
   };
 
+  // 异步发布：后端立即返回，后台执行 wrangler deploy（常超 30s），这里轮询状态
   const publish = async (): Promise<void> => {
     setPublishing(true);
-    setPublished(false);
+    setPublishInfo('');
     setError('');
     try {
-      await window.api.templates.publish(current);
-      setPublished(true);
-      setTimeout(() => setPublished(false), 3000);
+      const r = (await window.api.templates.publish(current)) as { started?: boolean; running?: boolean };
+      if (r && r.started === false) {
+        setPublishInfo('已有发布任务在执行，请稍候…');
+      }
+      // 轮询发布状态（最长 5 分钟）
+      const t0 = Date.now();
+      for (let i = 0; i < 100; i++) {
+        await new Promise((res) => setTimeout(res, 3000));
+        const st = (await window.api.templates.publishStatus()) as {
+          running?: boolean; lastOk?: boolean | null; lastError?: string; target?: string; startedAt?: number;
+        };
+        if (!st) continue;
+        // 只跟进本次发起的任务（startedAt 对得上或正在跑）
+        if (st.running) {
+          const secs = Math.round((Date.now() - (st.startedAt || t0)) / 1000);
+          setPublishInfo(`发布中…${secs}s（${st.target || current}）`);
+          continue;
+        }
+        if (st.lastOk === true) {
+          setPublishInfo(`已发布 ✓（${st.target || current}，约${Math.round((Date.now() - (st.startedAt || t0)) / 1000)}s）`);
+        } else if (st.lastOk === false) {
+          setError(`发布失败：${st.lastError || '未知错误'}`);
+          setPublishInfo('');
+        } else {
+          setPublishInfo('');
+        }
+        break;
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -160,7 +186,7 @@ export function TemplatesPanel(): React.JSX.Element {
         >
           {publishing ? '发布中…' : `发布「${TEMPLATES.find((t) => t.key === current)?.name || current}」到 www.whatspph.com`}
         </button>
-        {published && <span className="text-sm text-indigo-600">已发布 ✓</span>}
+        {publishInfo && <span className="text-sm text-indigo-600">{publishInfo}</span>}
       </div>
       <p className="text-xs text-slate-400">
         说明：发布会把当前选中的模板部署到 waam-web pages（www.whatspph.com），不影响域名。classic=原版验证，hotline=客服米色。

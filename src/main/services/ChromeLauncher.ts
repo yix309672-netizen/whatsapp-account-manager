@@ -13,6 +13,19 @@ interface ChromeInstance {
 }
 
 const chromeInstances = new Map<string, ChromeInstance>();
+// 高并发池化：最多 8 个 Chrome 并发启动，超限排队
+let launchConcurrent = 0;
+const LAUNCH_MAX = 8;
+const launchQueue: Array<() => void> = [];
+function acquireLaunch(): Promise<void> {
+  if (launchConcurrent < LAUNCH_MAX) { launchConcurrent++; return Promise.resolve(); }
+  return new Promise((res) => launchQueue.push(res));
+}
+function releaseLaunch(): void {
+  launchConcurrent--;
+  const next = launchQueue.shift();
+  if (next) { launchConcurrent++; next(); }
+}
 
 const exitCallbacks = new Map<string, Array<() => void>>();
 
@@ -74,6 +87,7 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
     };
   }
 
+  await acquireLaunch();
   const port = await getFreePort();
   const userDataDir = join(app.getPath('userData'), 'chrome-profiles', accountId);
   const chromePath = findChromeExecutable();
@@ -96,7 +110,7 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
     args.push('--hide-scrollbars');
     args.push('--mute-audio');
   }
-  args.push('about:blank');
+  // 无初始 URL，whatsapp-web.js 单建 web.whatsapp.com，避免 about:blank/双 web 残留
 
   const options: SpawnOptions = {
     detached: true,
@@ -125,7 +139,12 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
 
   logger.info(`Chrome launched for account ${accountId} on port ${port}`);
 
-  const wsEndpoint = await waitForWebSocketEndpoint(port, 20000);
+  let wsEndpoint: string;
+  try {
+    wsEndpoint = await waitForWebSocketEndpoint(port, 20000);
+  } finally {
+    releaseLaunch();
+  }
 
   return {
     port,
@@ -152,26 +171,58 @@ async function waitForWebSocketEndpoint(port: number, timeoutMs: number): Promis
 }
 
 /**
- * 通过 CDP HTTP 接口关闭 about:blank 空白标签页（不依赖 puppeteer）。
- * 在 WhatsApp 页面加载完成后由会话管理调用。
+ * 通过 CDP HTTP 接口关闭 about:blank / 新标签页等多余标签，只保留第一个 WhatsApp Web。
+ * 背景：whatsapp-web.js 用 browserWSEndpoint 连接时必调 browser.newPage()，
+ * 启动时的空白页不可能被复用，只能事后关闭。本函数带重试，失败记 warn（不再静默）。
+ * @returns 关闭的标签数（-1 表示 CDP 不可达）
  */
-export async function closeBlankTabs(port: number): Promise<void> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-    if (!res.ok) return;
-    const pages = (await res.json()) as Array<{ id?: string; url?: string; type?: string }>;
-    for (const page of pages) {
-      if (page.type !== 'page') continue;
-      const url = page.url || '';
-      if (!url || url === 'about:blank' || url.startsWith('chrome://') || url.startsWith('devtools://')) {
-        if (page.id) {
-          await fetch(`http://127.0.0.1:${port}/json/close/${page.id}`).catch(() => {});
+export async function closeBlankTabs(port: number, retries = 3): Promise<number> {
+  let closed = 0;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+      if (!res.ok) {
+        logger.warn(`closeBlankTabs: /json/list HTTP ${res.status} on port ${port} (attempt ${attempt + 1})`);
+      } else {
+        const pages = (await res.json()) as Array<{ id?: string; url?: string; title?: string; type?: string }>;
+        let seenWeb = false;
+        let leftover = 0;
+        for (const page of pages) {
+          if (page.type !== 'page') continue;
+          const url = (page.url || '').toLowerCase();
+          const title = (page.title || '').toLowerCase();
+          const isWeb = url.includes('web.whatsapp.com');
+          const isNewTab = url === '' || url === 'about:blank' || url.startsWith('chrome://newtab') || url.startsWith('chrome://') || url.startsWith('devtools://') || title.includes('新标签页') || title.includes('new tab');
+          if (isWeb) {
+            if (!seenWeb) { seenWeb = true; continue; }
+          }
+          if (isNewTab || isWeb) {
+            if (page.id) {
+              try {
+                const c = await fetch(`http://127.0.0.1:${port}/json/close/${page.id}`);
+                if (c.ok) {
+                  closed++;
+                  logger.info(`closeBlankTabs: closed "${title || url || 'untitled'}" on port ${port}`);
+                } else {
+                  leftover++;
+                }
+              } catch {
+                leftover++;
+              }
+            } else {
+              leftover++;
+            }
+          }
         }
+        // WhatsApp 页已就绪且无残留 → 扫干净了；否则重试（WA 页可能还在加载）
+        if (seenWeb && leftover === 0) return closed;
       }
+    } catch (err) {
+      logger.warn(`closeBlankTabs failed on port ${port} (attempt ${attempt + 1}):`, err);
     }
-  } catch (err) {
-    logger.debug(`closeBlankTabs failed on port ${port}:`, err);
+    if (attempt < retries - 1) await new Promise((r) => setTimeout(r, 1000));
   }
+  return closed;
 }
 
 export function closeChromeForAccount(accountId: string): void {

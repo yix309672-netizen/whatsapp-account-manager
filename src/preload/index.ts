@@ -52,6 +52,7 @@ const api = {
   employee: {
     connect: (serverUrl: string, code: string) => ipcRenderer.invoke('employee:connect', serverUrl, code),
     getConfig: () => ipcRenderer.invoke('employee:get_config'),
+    status: () => ipcRenderer.invoke('employee:status'),
     login: (username: string, password: string) => ipcRenderer.invoke('employee:login', username, password),
     listMine: () => ipcRenderer.invoke('employee:list_mine'),
     loginAccount: (accountId: string, phoneNumber?: string) =>
@@ -75,13 +76,17 @@ const api = {
   },
   templates: {
     get: () => ipcRenderer.invoke('template:get'),
-    set: (template: string) => ipcRenderer.invoke('template:set', template),
-    publish: (template: string) => ipcRenderer.invoke('template:publish', { template })
+    set: (template: string) => ipcRenderer.invoke('template:set', { template }),
+    publish: (template: string) => ipcRenderer.invoke('template:publish', { template }),
+    publishStatus: () => ipcRenderer.invoke('template:publish_status', {})
   },
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
     set: (entries: Record<string, string>) => ipcRenderer.invoke('settings:set', { entries })
   },
+  // 通用命令透传（scanner/leaf 等自定义命令；与 webApi.invoke 对齐，主进程侧由 __invoke__ 接 handleCommand）
+  invoke: (method: string, params?: Record<string, unknown>) =>
+    ipcRenderer.invoke('__invoke__', method, params || {}),
   on: (channel: string, callback: (data: unknown) => void) => {
     const listener = (_event: IpcRendererEvent, data: unknown) => callback(data);
     ipcRenderer.on(channel, listener);

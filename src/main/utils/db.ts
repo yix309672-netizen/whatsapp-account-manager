@@ -263,12 +263,101 @@ function runMigrations(): void {
     logger.info('Migrated accounts table: added remark column');
   }
 
+  // 迁移：scanner_tasks 新增 channel 列（pool=Checker池，web:<accountId>=管理器已登录账号直查）
+  try {
+    const chCols = db.prepare('PRAGMA table_info(scanner_tasks)').all() as Array<{ name: string }>;
+    if (!chCols.some((c) => c.name === 'channel')) {
+      db.exec("ALTER TABLE scanner_tasks ADD COLUMN channel TEXT NOT NULL DEFAULT 'pool'");
+      logger.info('Migrated scanner_tasks table: added channel column');
+    }
+  } catch (err) { logger.warn('Migrate scanner_tasks channel failed:', err); }
+
+  // 迁移：scanner_tasks 新增 kind 列（register=注册筛查，presence=活跃度）
+  try {
+    const taskCols = db.prepare('PRAGMA table_info(scanner_tasks)').all() as Array<{ name: string }>;
+    if (!taskCols.some((c) => c.name === 'kind')) {
+      db.exec("ALTER TABLE scanner_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'register'");
+      logger.info('Migrated scanner_tasks table: added kind column');
+    }
+  } catch (err) { logger.warn('Migrate scanner_tasks kind failed:', err); }
+
   // 迁移：employees 表新增 machine_fingerprint 列（员工端机器绑定）
   const empCols = db.prepare('PRAGMA table_info(employees)').all() as Array<{ name: string }>;
   if (!empCols.some((c) => c.name === 'machine_fingerprint')) {
     db.exec('ALTER TABLE employees ADD COLUMN machine_fingerprint TEXT');
     logger.info('Migrated employees table: added machine_fingerprint column');
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scanner_tasks (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      phones_json TEXT NOT NULL,
+      total INTEGER NOT NULL DEFAULT 0,
+      done INTEGER NOT NULL DEFAULT 0,
+      valid_count INTEGER NOT NULL DEFAULT 0,
+      invalid_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      finished_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS scanner_results (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      jid TEXT,
+      exists_flag INTEGER NOT NULL DEFAULT 0,
+      has_avatar INTEGER NOT NULL DEFAULT 0,
+      avatar_url TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      FOREIGN KEY(task_id) REFERENCES scanner_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_scanner_results_task ON scanner_results(task_id);
+    CREATE INDEX IF NOT EXISTS idx_scanner_tasks_status ON scanner_tasks(status);
+
+    -- 活跃度任务：presence_results 存 presence 结果；presence_cache 跨任务去重（默认7天内不重查）
+    CREATE TABLE IF NOT EXISTS presence_results (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      jid TEXT,
+      status TEXT NOT NULL DEFAULT 'hidden',
+      last_seen INTEGER,
+      checker_id INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      FOREIGN KEY(task_id) REFERENCES scanner_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_presence_results_task ON presence_results(task_id);
+    CREATE TABLE IF NOT EXISTS presence_cache (
+      phone TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      last_seen INTEGER,
+      checked_at INTEGER NOT NULL
+    );
+
+    -- 客服聊天：phone 为手机号或 guest-id；sender=user|agent|system
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone TEXT NOT NULL,
+      sender TEXT NOT NULL DEFAULT 'user',
+      content TEXT NOT NULL,
+      read_flag INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_phone ON chat_messages(phone);
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
+
+    -- Leaf 号段模式：biz_tag 主键，max_id 已分配最大值，step 步长（移植自美团 Leaf leaf_alloc）
+    CREATE TABLE IF NOT EXISTS leaf_alloc (
+      biz_tag TEXT PRIMARY KEY,
+      max_id INTEGER NOT NULL DEFAULT 0,
+      step INTEGER NOT NULL DEFAULT 1000,
+      description TEXT,
+      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+  `);
 
   // 初始化默认管理员账号（仅当 admin_users 为空时）
   const adminCount = (db.prepare('SELECT COUNT(*) c FROM admin_users').get() as { c: number }).c;

@@ -1,15 +1,33 @@
 import { useEffect, useState } from 'react';
-import { loginAdmin, getToken, logoutAdmin } from '../webApi';
+import { loginAdmin, fetchCaptcha, logoutAdmin } from '../webApi';
+import w171Bg from '../assets/w171-m.webp';
 
 export function LoginGate({ children }: { children: React.ReactNode }): React.JSX.Element {
-  const [authed, setAuthed] = useState<boolean>(!!getToken());
+  const [authed, setAuthed] = useState<boolean>(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [captcha, setCaptcha] = useState('');
+  const [captchaId, setCaptchaId] = useState('');
+  const [captchaSvg, setCaptchaSvg] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const loadCaptcha = async (): Promise<void> => {
+    try {
+      const c = await fetchCaptcha();
+      setCaptchaId(c.id);
+      setCaptchaSvg(c.svg);
+    } catch {
+      setCaptchaId('');
+      setCaptchaSvg('');
+    }
+  };
+
   useEffect(() => {
-    if (getToken()) setAuthed(true);
+    // 每次进入强制登录：清旧 token
+    logoutAdmin();
+    setAuthed(false);
+    loadCaptcha();
   }, []);
 
   const handleLogin = async (): Promise<void> => {
@@ -18,12 +36,19 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
       setError('请输入账号和密码');
       return;
     }
+    if (!captcha.trim()) {
+      setError('请输入验证码');
+      return;
+    }
     setLoading(true);
     try {
-      await loginAdmin(username.trim(), password.trim());
+      await loginAdmin(username.trim(), password.trim(), captchaId, captcha.trim());
       setAuthed(true);
     } catch (err) {
       setError((err as Error).message || '登录失败');
+      // 验证码一次性，失败就换一张
+      setCaptcha('');
+      loadCaptcha();
     } finally {
       setLoading(false);
     }
@@ -38,20 +63,17 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
 
   if (!authed) {
     return (
-      <div className="relative min-h-screen flex items-center justify-center px-4 overflow-hidden">
-        {/* 动态古风侠义动漫背景 */}
+      <div className="relative min-h-screen flex items-center justify-center md:justify-start px-4 md:pl-[8%] overflow-hidden">
+        {/* 古风背景 - 仅背景缓慢平移，登录框本身静止 */}
         <div
-          className="absolute inset-0 bg-cover bg-center animate-[saijiFade_18s_ease-in-out_infinite]"
+          className="absolute inset-0 bg-cover animate-[wuxiaPan_20s_ease-in-out_infinite]"
           style={{
-            backgroundImage:
-              "url('https://images.unsplash.com/photo-1547981609-4b6bfe67ca0b?q=80&w=2000&auto=format&fit=crop')",
-            filter: 'brightness(0.35)',
+            backgroundImage: `url(${w171Bg})`,
+            backgroundPosition: 'center top',
+            filter: 'brightness(0.42) saturate(1.05)',
           }}
         />
-        <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/80" />
-
-        {/* 飘落古风粒子 */}
-        <div className="absolute inset-0 pointer-events-none" id="wuxia-particles" />
+        <div className="absolute inset-0 bg-gradient-to-b from-black/55 via-black/20 to-black/75" />
 
         <div className="relative z-10 w-full max-w-md">
           <div className="rounded-2xl border border-amber-500/30 bg-black/55 backdrop-blur-xl p-8 shadow-[0_0_40px_rgba(217,119,6,0.3)]">
@@ -89,6 +111,32 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
                 />
               </div>
 
+              <div>
+                <label className="text-xs text-amber-200/70 tracking-widest mb-1.5 block">验 证 码 · CAPTCHA</label>
+                <div className="flex gap-2">
+                  <input
+                    value={captcha}
+                    onChange={(e) => setCaptcha(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                    placeholder="请输入验证码"
+                    maxLength={8}
+                    className="flex-1 min-w-0 px-4 py-3 rounded-lg bg-black/40 border border-amber-500/25 text-amber-50 text-sm tracking-[0.3em] focus:outline-none focus:border-amber-500 focus:shadow-[0_0_12px_rgba(217,119,6,0.3)] transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={loadCaptcha}
+                    title="换一张"
+                    className="shrink-0 rounded-lg overflow-hidden border border-amber-500/25 bg-[#fef3c7] h-[46px] w-[110px]"
+                  >
+                    {captchaSvg ? (
+                      <img src={`data:image/svg+xml;utf8,${encodeURIComponent(captchaSvg)}`} alt="验证码" className="h-full w-full object-cover" />
+                    ) : (
+                      <span className="text-xs text-amber-700">加载中…</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+
               {error && <p className="text-xs text-red-400 text-center">⚠ {error}</p>}
 
               <button
@@ -104,25 +152,13 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
         </div>
 
         <style>{`
-          @keyframes saijiFade {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.06); }
-          }
-          #wuxia-particles span {
-            position: absolute;
-            top: -10vh;
-            color: rgba(217,119,6,0.7);
-            animation-name: fall;
-            animation-timing-function: linear;
-            animation-iteration-count: infinite;
-          }
-          @keyframes fall {
-            0% { transform: translateY(0) rotate(0deg); opacity: 0; }
-            10% { opacity: 0.9; }
-            100% { transform: translateY(120vh) rotate(360deg); opacity: 0.2; }
+          @keyframes wuxiaPan {
+            0%, 100% { transform: scale(1) translateX(0); }
+            25% { transform: scale(1.02) translateX(-0.8%); }
+            50% { transform: scale(1.02) translateX(0.8%); }
+            75% { transform: scale(1.01) translateX(-0.4%); }
           }
         `}</style>
-        <WuxiaParticles />
       </div>
     );
   }
@@ -140,31 +176,5 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
       </div>
       <div className="flex-1">{children}</div>
     </div>
-  );
-}
-
-// 古风飘落粒子（樱花/落叶/剑气）
-function WuxiaParticles(): React.JSX.Element {
-  const particles = Array.from({ length: 14 }, (_, i) => ({
-    left: Math.random() * 100,
-    delay: Math.random() * 6,
-    dur: 6 + Math.random() * 8,
-    size: 6 + Math.random() * 10,
-    glyph: ['✦', '❋', '☯', '✧', '葉', '◈', '❖'][i % 7],
-  }));
-  return (
-    <>{particles.map((p, i) => (
-      <span
-        key={i}
-        style={{
-          left: `${p.left}%`,
-          fontSize: `${p.size}px`,
-          animationDuration: `${p.dur}s`,
-          animationDelay: `${p.delay}s`,
-        }}
-      >
-        {p.glyph}
-      </span>
-    ))}</>
   );
 }

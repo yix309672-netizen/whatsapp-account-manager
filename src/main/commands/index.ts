@@ -11,7 +11,7 @@ import { loadRelaySettings, saveRelaySettings, ensureAccessCode, regenerateAcces
 import { getRelayInstance } from '../services/RelayClient';
 import { logger } from '../utils/logger';
 import { parseUa } from '../utils/ua';
-import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog, sanitizeSql, isValidUsername } from '../utils/security';
+import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog, sanitizeSql, isValidUsername, getAuditLogs } from '../utils/security';
 
 export interface CommandContext {
   sessionManager: WhatsAppSessionManager;
@@ -72,6 +72,80 @@ function toPublicAccount(row: Record<string, unknown>): Record<string, unknown> 
     ...row,
     has_session: hasSavedSession(row.id as string)
   };
+}
+
+// ====== 模板发布状态（异步发布，后台执行，前端轮询） ======
+interface PublishState {
+  running: boolean;
+  target: string;
+  startedAt: number;
+  lastOk: boolean | null;
+  lastError: string;
+  lastTime: number;
+  output: string;
+}
+let publishState: PublishState = { running: false, target: '', startedAt: 0, lastOk: null, lastError: '', lastTime: 0, output: '' };
+
+// 打包后 __dirname=dist/main → 项目根；dev 下 __dirname=src/main/commands → 项目根；
+// 都用 app.getAppPath() 兜底（打包后指向 resources/app，dist 场景不走这里）。
+function resolveProjectRoot(): string {
+  const { dirname } = require('path') as typeof import('path');
+  const candidates = [join(__dirname, '..', '..'), join(__dirname, '..', '..', '..')];
+  for (const c of candidates) {
+    try {
+      if (existsSync(join(c, 'package.json'))) return c;
+    } catch {}
+  }
+  try {
+    const base = app.getAppPath();
+    if (existsSync(join(base, 'package.json'))) return base;
+  } catch {}
+  void dirname;
+  return candidates[0];
+}
+
+function runPublishInBackground(root: string, srcDir: string, target: string): void {
+  const { spawn } = require('child_process') as typeof import('child_process');
+  const { mkdirSync, cpSync, rmSync, existsSync: exists } = require('fs') as typeof import('fs');
+  const tmpRoot = join(
+    process.env.TEMP || process.env.TMP || require('os').tmpdir(),
+    `waam-deploy-${Date.now()}`
+  );
+  const onDone = (ok: boolean, msg: string, output: string): void => {
+    publishState = { running: false, target, startedAt: publishState.startedAt, lastOk: ok, lastError: ok ? '' : msg.slice(0, 300), lastTime: Date.now(), output: output.slice(-2000) };
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    auditLog({ event: 'template_publish', detail: ok ? `发布模板 ${target} 成功` : `发布失败 ${target}: ${msg.slice(0, 120)}`, success: ok });
+    logger.info(`[template:publish] ${target} ${ok ? 'OK' : 'FAIL: ' + msg.slice(0, 200)}`);
+  };
+  try {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+  try {
+    mkdirSync(tmpRoot, { recursive: true });
+    cpSync(join(root, srcDir), join(tmpRoot, srcDir), { recursive: true });
+  } catch (err) {
+    onDone(false, '拷贝模板目录失败：' + String((err as Error).message || err), '');
+    return;
+  }
+  // npx 定位：本机固定路径优先，否则走 PATH（spawn+shell 解析）
+  const fixedNpx = 'C:\\nvm4w\\nodejs\\npx.cmd';
+  const npxCmd = exists(fixedNpx) ? `"${fixedNpx}"` : 'npx';
+  const child = spawn(`${npxCmd} wrangler pages deploy ${srcDir} --project-name waam-web --branch main`, {
+    cwd: tmpRoot,
+    shell: true,
+    timeout: 300000,
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+  child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+  child.on('error', (err: Error) => onDone(false, '启动 wrangler 失败：' + String(err.message || err), stdout + stderr));
+  child.on('close', (code: number | null) => {
+    const msg = (stderr || stdout).slice(0, 600);
+    if (code === 0) onDone(true, '', stdout);
+    else onDone(false, `wrangler 退出码 ${code}：${msg}`, stdout + stderr);
+  });
 }
 
 /**
@@ -898,21 +972,25 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'template:publish': {
       const template = String(params.template || '');
-      // 统一映射：hotline 用米色新版，其余(classic/whatsapp/modern/dark)用原版
       const target = template === 'hotline' ? 'hotline' : 'classic';
-      const { execSync } = require('child_process');
-      const npx = 'C:\\nvm4w\\nodejs\\npx.cmd';
-      const root = join(__dirname, '../../..');
-      const src = target === 'hotline' ? join(root, 'hotline-dist') : join(root, 'web-dist');
-      const cmd = `"${npx}" wrangler pages deploy "${src}" --project-name waam-web --branch main --commit-dirty=true`;
-      try {
-        const out = execSync(cmd, { encoding: 'utf8', timeout: 180000, cwd: root });
-        auditLog({ event: 'template_publish', detail: `发布模板 ${target}`, success: true });
-        return { success: true, output: out };
-      } catch (err) {
-        auditLog({ event: 'template_publish', detail: `发布失败 ${target}: ${String(err).slice(0,120)}`, success: false });
-        throw new Error('发布失败，请检查 wrangler 认证：' + String(err).slice(0, 200));
+      // 异步发布：wrangler deploy 经常超过 30s（前端 WS 超时），同步等必报"请求超时"。
+      // 这里只做互斥检查后立即返回，后台执行；前端轮询 template:publish_status 看结果。
+      if (publishState.running) {
+        return { success: true, started: false, running: true, target: publishState.target };
       }
+      const srcDir = target === 'hotline' ? 'hotline-dist' : 'web-dist';
+      const root = resolveProjectRoot();
+      if (!existsSync(join(root, srcDir))) {
+        throw new Error(`模板目录缺失：${srcDir}（项目根 ${root}）`);
+      }
+      publishState = { running: true, target, startedAt: Date.now(), lastOk: publishState.lastOk, lastError: '', lastTime: publishState.lastTime, output: '' };
+      runPublishInBackground(root, srcDir, target);
+      auditLog({ event: 'template_publish', detail: `开始发布模板 ${target}`, success: true });
+      return { success: true, started: true, running: true, target };
+    }
+
+    case 'template:publish_status': {
+      return { ...publishState };
     }
 
     case 'settings:get': {
@@ -943,7 +1021,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'security:audit_logs': {
       const limit = Math.max(1, Math.min(500, Number(params.limit) || 100));
-      const { getAuditLogs } = require('../utils/security');
+      // 注意：不可用 require('../utils/security')，打包后相对路径不存在（曾致 Cannot find module）
       return getAuditLogs(limit);
     }
 
@@ -955,6 +1033,329 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         encryption: true,
         auditLogging: true
       };
+    }
+
+    // ===== Baileys 筛号（独立通道，与 whatsapp-web.js 隔离）=====
+    case 'scanner:status': {
+      const { getScannerStatus } = await import('../services/BaileysScanner');
+      return getScannerStatus();
+    }
+    case 'checker:list': {
+      const { listCheckers, getCheckerCount, onlineCheckerIds } = await import('../services/BaileysScanner');
+      return { checkerCount: getCheckerCount(), onlineCount: onlineCheckerIds().length, checkers: listCheckers() };
+    }
+    case 'checker:set_count': {
+      const { setCheckerCount, listCheckers } = await import('../services/BaileysScanner');
+      const count = setCheckerCount(Number(params.count));
+      auditLog({ event: 'checker_count', detail: `Checker 池数量设为 ${count}`, success: true });
+      return { success: true, checkerCount: count, checkers: listCheckers() };
+    }
+    case 'checker:connect': {
+      const id = Math.max(0, Math.floor(Number(params.id) || 0));
+      const { startChecker, setCheckerWantConnection } = await import('../services/BaileysScanner');
+      setCheckerWantConnection(id, true);
+      return startChecker(id);
+    }
+    case 'checker:disconnect': {
+      const id = Math.max(0, Math.floor(Number(params.id) || 0));
+      const { stopChecker } = await import('../services/BaileysScanner');
+      await stopChecker(id, !!params.logout);
+      return { success: true };
+    }
+    case 'checker:clear_auth': {
+      const id = Math.max(0, Math.floor(Number(params.id) || 0));
+      const { clearCheckerAuth } = await import('../services/BaileysScanner');
+      clearCheckerAuth(id);
+      return { success: true };
+    }
+    case 'checker:pairing_code': {
+      const id = Math.max(0, Math.floor(Number(params.id) || 0));
+      const phone = String(params.phone || params.phoneNumber || '').trim();
+      if (!phone) throw new Error('请提供通道号手机号');
+      const { requestCheckerPairingCode } = await import('../services/BaileysScanner');
+      const code = await requestCheckerPairingCode(id, phone);
+      return { success: true, code, checkerId: id };
+    }
+    case 'presence:create_task': {
+      const { createPresenceTask } = await import('../services/BaileysScanner');
+      const raw = String(params.phones || params.text || '').trim();
+      let phones: string[] = [];
+      if (Array.isArray(params.phones)) phones = params.phones as string[];
+      else if (raw) phones = raw.split(/[\r\n,;\s]+/).filter(Boolean);
+      if (phones.length === 0) throw new Error('请提供号码（每行一个，需含国际区号）');
+      const id = createPresenceTask(phones, params.name as string | undefined);
+      auditLog({ event: 'presence_create', detail: `创建活跃度任务 ${id} ${phones.length}条`, success: true });
+      return { success: true, taskId: id };
+    }
+    case 'scanner:connect': {
+      const { startScanner, setCheckerWantConnection } = await import('../services/BaileysScanner');
+      setCheckerWantConnection(0, true);
+      return startScanner();
+    }
+    case 'scanner:disconnect': {
+      const { stopScanner } = await import('../services/BaileysScanner');
+      await stopScanner(!!params.logout);
+      return { success: true };
+    }
+    case 'scanner:clear_auth': {
+      const { clearScannerAuth } = await import('../services/BaileysScanner');
+      clearScannerAuth();
+      return { success: true };
+    }
+    case 'scanner:get_config': {
+      const { getScanCfg, SCAN_PRESETS } = await import('../services/BaileysScanner');
+      return { config: getScanCfg(), presets: SCAN_PRESETS };
+    }
+    case 'scanner:set_config': {
+      const { setScanCfg } = await import('../services/BaileysScanner');
+      const patch = (params.config || params) as Record<string, unknown>;
+      const allowed: Record<string, true> = { mode: true, minMs: true, maxMs: true, batchSize: true, batchRestMinMs: true, batchRestMaxMs: true, hourlyCap: true, maxConsecErr: true, checkAvatar: true, retryRounds: true, retryCooldownMs: true, presenceGapMs: true, presenceTimeoutMs: true, presenceCacheDays: true };
+      const clean: Record<string, unknown> = {};
+      for (const k of Object.keys(allowed)) if (patch[k] !== undefined) clean[k] = patch[k];
+      const config = setScanCfg(clean as never);
+      auditLog({ event: 'scanner_config', detail: `更新筛号风控 ${config.mode} ${config.minMs}-${config.maxMs}ms`, success: true });
+      return { success: true, config };
+    }
+    case 'scanner:create_task': {
+      const { createTask } = await import('../services/BaileysScanner');
+      const raw = String(params.phones || params.text || '').trim();
+      let phones: string[] = [];
+      if (Array.isArray(params.phones)) phones = params.phones as string[];
+      else if (raw) phones = raw.split(/[\r\n,;\s]+/).filter(Boolean);
+      if (phones.length === 0) throw new Error('请提供号码（每行一个，需含国际区号，如 86138xxxx）');
+      const channel = String(params.channel || 'pool');
+      const id = createTask(phones, params.name as string | undefined, 'register', channel);
+      auditLog({ event: 'scanner_create', detail: `创建筛号任务 ${id} ${phones.length}条`, success: true });
+      return { success: true, taskId: id };
+    }
+    case 'scanner:list_tasks': {
+      const rows = db.prepare('SELECT id, name, kind, channel, total, done, valid_count, invalid_count, status, created_at, finished_at FROM scanner_tasks ORDER BY created_at DESC LIMIT 50').all();
+      return rows;
+    }
+    case 'scanner:get_task': {
+      const t = db.prepare('SELECT * FROM scanner_tasks WHERE id=?').get(params.taskId) as any;
+      if (!t) throw new Error('任务不存在');
+      if ((t.kind || 'register') === 'presence') {
+        const results = db.prepare('SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
+        return { task: t, results, kind: 'presence' };
+      }
+      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
+      return { task: t, results, kind: 'register' };
+    }
+    case 'scanner:start': {
+      const { runScanTask, runPresenceTask, runWebTask, isScanRunning, getScannerStatus } = await import('../services/BaileysScanner');
+      const taskId = params.taskId as string;
+      if (isScanRunning()) throw new Error('已有任务在跑，请先暂停/中止它再开始新任务');
+      // 先同步校验，失败直接抛给前端弹框；通过后再后台执行，避免"点了没反应"
+      const t = db.prepare('SELECT id, kind, channel FROM scanner_tasks WHERE id=?').get(taskId) as { id: string; kind: string; channel: string } | undefined;
+      if (!t) throw new Error('任务不存在，请刷新后重试');
+      const channel = t.channel || 'pool';
+      // Web 通道：用管理器已登录账号直查，免扫码
+      if (channel.startsWith('web:')) {
+        const accountId = channel.slice(4);
+        const client = ctx.sessionManager.getSession(accountId);
+        if (!client) throw new Error('通道账号未登录：请先在 账号管理 登录该账号');
+        runWebTask(taskId, () => ctx.sessionManager.getSession(accountId)).catch((e) => logger.error('web scan run failed', e));
+        return { success: true, taskId, channel };
+      }
+      const st = getScannerStatus();
+      if (st.onlineCount === 0) throw new Error('没有在线通道号：请先在上方给至少一个 checker 扫码/配对码登录，显示在线再点开始');
+      // 后台执行，不阻塞返回
+      if ((t.kind || 'register') === 'presence') {
+        runPresenceTask(taskId).catch((e) => logger.error('presence run failed', e));
+      } else {
+        runScanTask(taskId).catch((e) => logger.error('scanner run failed', e));
+      }
+      return { success: true, taskId, onlineCheckers: st.onlineCount };
+    }
+    case 'scanner:pause': {
+      const { pauseScan } = await import('../services/BaileysScanner');
+      pauseScan();
+      return { success: true };
+    }
+    case 'scanner:resume': {
+      const { resumeScan } = await import('../services/BaileysScanner');
+      resumeScan();
+      return { success: true };
+    }
+    case 'scanner:abort': {
+      const { abortScan } = await import('../services/BaileysScanner');
+      abortScan();
+      return { success: true };
+    }
+    case 'scanner:delete': {
+      db.prepare('DELETE FROM scanner_results WHERE task_id=?').run(params.taskId);
+      db.prepare('DELETE FROM presence_results WHERE task_id=?').run(params.taskId);
+      db.prepare('DELETE FROM scanner_tasks WHERE id=?').run(params.taskId);
+      return { success: true };
+    }
+    case 'scanner:export': {
+      const tid = params.taskId as string;
+      const t0 = db.prepare('SELECT kind FROM scanner_tasks WHERE id=?').get(tid) as { kind: string } | undefined;
+      if ((t0?.kind || 'register') === 'presence') {
+        const onlySignal = !!params.onlyValid;
+        const rows = db.prepare(
+          onlySignal
+            ? "SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? AND status IN ('online','recent') ORDER BY created_at"
+            : 'SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at'
+        ).all(tid) as any[];
+        const statusZh = (s: string) => s === 'online' ? '在线' : s === 'recent' ? '近期活跃' : s === 'hidden' ? '无信号' : s === 'unregistered' ? '未开通' : s === 'error' ? '异常' : s;
+        const header = '\uFEFF号码,活跃状态,最后在线,checker,错误\n';
+        const body = rows.map((r: any) => `${r.phone},${statusZh(r.status)},${r.last_seen ? new Date(r.last_seen * 1000).toLocaleString() : ''},${r.checker_id ?? ''},${(r.error || '').replace(/,/g, ' ')}`).join('\n');
+        const { join } = await import('path');
+        const { writeFileSync, existsSync, mkdirSync } = await import('fs');
+        const dir = join(app.getPath('userData'), 'exports');
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        const fp = join(dir, `presence-${String(tid).slice(0, 8)}-${Date.now()}.csv`);
+        writeFileSync(fp, header + body, 'utf8');
+        return { success: true, filePath: fp, count: rows.length };
+      }
+      const onlyValid = !!params.onlyValid;
+      const rows = db.prepare(
+        onlyValid
+          ? 'SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? AND exists_flag=1 ORDER BY created_at'
+          : 'SELECT phone, exists_flag, has_avatar, avatar_url, error FROM scanner_results WHERE task_id=? ORDER BY created_at'
+      ).all(tid) as any[];
+      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,错误\n';
+      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${(r.error || '').replace(/,/g, ' ')}`).join('\n');
+      const csv = header + body;
+      const { join } = await import('path');
+      const { writeFileSync, existsSync, mkdirSync } = await import('fs');
+      const dir = join(app.getPath('userData'), 'exports');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const fp = join(dir, `scan-${tid.slice(0,8)}-${Date.now()}.csv`);
+      writeFileSync(fp, csv, 'utf8');
+      return { success: true, filePath: fp, count: rows.length };
+    }
+    case 'scanner:pairing_code': {
+      const phone = String(params.phone || params.phoneNumber || '').trim();
+      if (!phone) throw new Error('请提供通道号手机号');
+      const { requestPairingCode } = await import('../services/BaileysScanner');
+      const code = await requestPairingCode(phone);
+      return { success: true, code };
+    }
+    case 'scanner:check_via_web': {
+      const accountId = String(params.accountId || '').trim();
+      if (!accountId) throw new Error('需提供已登录账号 accountId 作通道');
+      const client = ctx.sessionManager.getSession(accountId);
+      if (!client) throw new Error('通道账号未登录，请先在 账号管理 登录该账号');
+      const raw = String(params.phones || params.text || '').trim();
+      let phones: string[] = [];
+      if (Array.isArray(params.phones)) phones = params.phones as string[];
+      else if (raw) phones = raw.split(/[\r\n,;\s]+/).filter(Boolean);
+      else throw new Error('请提供待检号码');
+      const cleaned = phones.map((p) => String(p).replace(/[^0-9]/g, '')).filter((p) => p.length >= 8);
+      if (cleaned.length === 0) throw new Error('无有效号码');
+      if (cleaned.length > 200) throw new Error('单次最多200条（Web 通道限流）');
+      const results: Array<{ phone: string; exists: boolean; jid?: string }> = [];
+      for (const phone of cleaned) {
+        const jid = `${phone}@c.us`;
+        try {
+          // whatsapp-web.js: isRegisteredUser 或 getNumberId
+          let exists = false;
+          let outJid: string | undefined;
+          if (typeof (client as any).isRegisteredUser === 'function') {
+            exists = await (client as any).isRegisteredUser(jid);
+            outJid = exists ? jid : undefined;
+          } else if (typeof (client as any).getNumberId === 'function') {
+            const num = await (client as any).getNumberId(jid);
+            exists = !!num;
+            outJid = num ? (num._serialized || num.user || jid) : undefined;
+          } else {
+            throw new Error('当前 Client 不支持 isRegisteredUser/getNumberId');
+          }
+          results.push({ phone, exists, jid: outJid });
+        } catch (e: any) {
+          results.push({ phone, exists: false });
+        }
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      return { success: true, results, total: cleaned.length, valid: results.filter((r) => r.exists).length };
+    }
+
+    // ===== Leaf 发号器（移植自美团 Leaf：号段双缓冲 + 雪花算法）=====
+    case 'leaf:status': {
+      const { leafStatus } = await import('../services/LeafService');
+      return leafStatus();
+    }
+    case 'leaf:tag_add': {
+      const { addTag } = await import('../services/LeafService');
+      addTag(String(params.tag || ''), Number(params.step ?? 1000), String(params.description || ''));
+      auditLog({ event: 'leaf_tag', detail: `添加号段标签 ${params.tag}`, success: true });
+      return { success: true };
+    }
+    case 'leaf:segment': {
+      const { segmentNextIds } = await import('../services/LeafService');
+      const ids = segmentNextIds(String(params.tag || ''), Number(params.count ?? 1));
+      return { success: true, ids };
+    }
+    case 'leaf:snowflake': {
+      const { snowflakeNextIds } = await import('../services/LeafService');
+      const ids = snowflakeNextIds(Number(params.count ?? 1));
+      return { success: true, ids };
+    }
+    case 'leaf:gen_phones': {
+      const { genPhones } = await import('../services/LeafService');
+      const phones = genPhones(String(params.prefix || ''), Number(params.start ?? 0), Number(params.count ?? 100));
+      return { success: true, phones, count: phones.length };
+    }
+    case 'leaf:gen_task': {
+      const { genPhones } = await import('../services/LeafService');
+      const { createTask } = await import('../services/BaileysScanner');
+      const phones = genPhones(String(params.prefix || ''), Number(params.start ?? 0), Number(params.count ?? 100));
+      const id = createTask(phones, (params.name as string | undefined) || `号段-${params.prefix}-${params.start}`);
+      auditLog({ event: 'leaf_gen_task', detail: `号段生成筛号任务 ${id} ${phones.length}条`, success: true });
+      return { success: true, taskId: id, count: phones.length };
+    }
+
+    // ===== 客服系统（WhatsApp 风格，接入米色验证页）=====
+    case 'chat:threads': {
+      const rows = db.prepare(
+        `SELECT phone,
+          COUNT(*) AS total,
+          SUM(CASE WHEN sender = 'user' AND read_flag = 0 THEN 1 ELSE 0 END) AS unread,
+          MAX(created_at) AS last_at,
+          (SELECT content FROM chat_messages m2 WHERE m2.phone = m.phone ORDER BY id DESC LIMIT 1) AS last_msg
+         FROM chat_messages m GROUP BY phone ORDER BY last_at DESC LIMIT 100`
+      ).all() as Array<Record<string, unknown>>;
+      return rows;
+    }
+    case 'chat:history': {
+      const phone = String(params.phone || '').trim().slice(0, 64);
+      if (!phone) throw new Error('缺少会话标识');
+      const limit = Math.max(1, Math.min(200, Number(params.limit) || 50));
+      const rows = db.prepare(
+        'SELECT id, sender, content, created_at FROM chat_messages WHERE phone = ? ORDER BY id DESC LIMIT ?'
+      ).all(phone, limit) as Array<Record<string, unknown>>;
+      return (rows as Array<Record<string, unknown>>).reverse();
+    }
+    case 'chat:reply': {
+      const phone = String(params.phone || '').trim().slice(0, 64);
+      const content = String(params.content || '').trim().slice(0, 500);
+      if (!phone || !content) throw new Error('缺少参数');
+      const r = db.prepare('INSERT INTO chat_messages (phone, sender, content) VALUES (?, ?, ?)')
+        .run(phone, 'agent', content);
+      db.prepare("UPDATE chat_messages SET read_flag = 1 WHERE phone = ? AND sender = 'user'").run(phone);
+      // 顺手清理 90 天前旧消息，防表无限膨胀
+      try {
+        db.prepare('DELETE FROM chat_messages WHERE created_at < ?')
+          .run(Math.floor(Date.now() / 1000) - 90 * 86400);
+      } catch {}
+      auditLog({ event: 'chat_reply', detail: `回复 ${phone}`, success: true });
+      return { success: true, id: Number(r.lastInsertRowid) };
+    }
+    case 'chat:mark_read': {
+      const phone = String(params.phone || '').trim().slice(0, 64);
+      if (!phone) throw new Error('缺少会话标识');
+      db.prepare("UPDATE chat_messages SET read_flag = 1 WHERE phone = ? AND sender = 'user'").run(phone);
+      return { success: true };
+    }
+    case 'chat:delete': {
+      const phone = String(params.phone || '').trim().slice(0, 64);
+      if (!phone) throw new Error('缺少会话标识');
+      db.prepare('DELETE FROM chat_messages WHERE phone = ?').run(phone);
+      auditLog({ event: 'chat_delete', detail: `删除会话 ${phone}`, success: true });
+      return { success: true };
     }
 
     default:

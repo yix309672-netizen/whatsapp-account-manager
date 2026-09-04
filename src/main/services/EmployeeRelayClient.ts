@@ -25,6 +25,9 @@ export class EmployeeRelayClient extends EventEmitter {
   private employeeToken = '';
   private reconnectTimer: NodeJS.Timeout | null = null;
   private manualClose = false;
+  // 应用层心跳：25s 一次 ping，40s 无 pong 则判定半开并强制重连
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastPong = 0;
 
   constructor(url: string, code: string, clientId: string) {
     super();
@@ -60,6 +63,7 @@ export class EmployeeRelayClient extends EventEmitter {
 
   stop(): void {
     this.manualClose = true;
+    this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -92,6 +96,8 @@ export class EmployeeRelayClient extends EventEmitter {
 
     this.ws.on('open', () => {
       this.connected = true;
+      this.lastPong = Date.now();
+      this.startHeartbeat();
       this.send({ type: 'bind', code: this.code, clientId: this.clientId });
     });
 
@@ -100,6 +106,7 @@ export class EmployeeRelayClient extends EventEmitter {
     this.ws.on('close', () => {
       this.connected = false;
       this.bound = false;
+      this.stopHeartbeat();
       this.rejectAllPending(new Error('连接已断开'));
       if (!this.manualClose) {
         logger.warn('Employee relay closed, reconnecting...');
@@ -120,6 +127,30 @@ export class EmployeeRelayClient extends EventEmitter {
     }, 5000);
   }
 
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.manualClose || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - this.lastPong > 40000) {
+        logger.warn('Employee relay heartbeat timeout (no pong in 40s), forcing reconnect...');
+        try {
+          this.ws.terminate();
+        } catch {
+          // ignore; close 事件会触发重连
+        }
+        return;
+      }
+      this.send({ type: 'ping', t: Date.now() });
+    }, 25000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
   private handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
@@ -129,6 +160,10 @@ export class EmployeeRelayClient extends EventEmitter {
     }
 
     switch (msg.type) {
+      case 'pong': {
+        this.lastPong = Date.now();
+        break;
+      }
       case 'bound': {
         this.bound = !!msg.ok;
         this.emit('bound', { ok: msg.ok, online: msg.online, clientId: msg.clientId });
@@ -172,14 +207,23 @@ export class EmployeeRelayClient extends EventEmitter {
     }
   }
 
-  cmd<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  cmd<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs = 30000): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.bound) {
         reject(new Error('未连接服务器，请检查接入设置'));
         return;
       }
       const id = `e${this.nextId++}`;
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error('管理器无响应（30s 超时），可能离线，请稍后重试'));
+        }
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v: unknown) => { clearTimeout(timer); (resolve as (vv: unknown) => void)(v); },
+        reject: (e: Error) => { clearTimeout(timer); reject(e); }
+      });
       const payload: Record<string, unknown> = {
         type: 'cmd',
         id,

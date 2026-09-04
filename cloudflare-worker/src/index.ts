@@ -95,6 +95,14 @@ export class Room {
     }
 
     switch (msg.type) {
+      // 应用层心跳：防止 NAT/边缘静默丢弃导致半开连接（管理端以为在线、中转已忘掉）
+      case 'ping': {
+        this.send(connId, { type: 'pong', t: typeof msg.t === 'number' ? msg.t : null });
+        break;
+      }
+      case 'pong': {
+        break;
+      }
       case 'register': {
         // 管理器注册：同一房间只保留一个 manager，新的替换旧的
         if (this.managerId && this.managerId !== connId) {
