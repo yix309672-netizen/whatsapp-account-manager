@@ -1,7 +1,13 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
+import { app as electronApp } from 'electron';
+
+// electron userData 目录（导出文件所在）。用函数包一层：单元测试/非 electron 环境 require 失败时抛错而不是启动即崩
+function getElectronUserData(): string {
+  return electronApp.getPath('userData');
+}
 import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
-import { join, extname, dirname } from 'path';
+import { join, extname, dirname, basename } from 'path';
 import { randomBytes, createHash } from 'crypto';
 import { handleCommand, CommandContext } from '../commands';
 import { WhatsAppSessionManager } from '../services/WhatsAppSessionManager';
@@ -571,6 +577,42 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '状态获取失败' }));
+      }
+      return;
+    }
+
+    // 导出文件下载（管理员 token 鉴权；只允许 exports 目录下的 .csv 基名，防目录穿越）
+    if (pathname === '/api/export-download' && req.method === 'GET') {
+      const token = url.searchParams.get('token') || (req.headers['x-admin-token'] as string) || '';
+      if (!isValidToken(token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '未授权' }));
+        return;
+      }
+      const base = basename(String(url.searchParams.get('file') || ''));
+      if (!base || !/^[\w\-. ]+\.csv$/i.test(base)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '文件名不合法' }));
+        return;
+      }
+      const exportDir = join(getElectronUserData(), 'exports');
+      const full = join(exportDir, base);
+      if (!full.startsWith(exportDir) || !existsSync(full)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '文件不存在' }));
+        return;
+      }
+      try {
+        const data = readFileSync(full);
+        res.writeHead(200, {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(base)}"`,
+          'Content-Length': data.length,
+        });
+        res.end(data);
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '读取失败' }));
       }
       return;
     }

@@ -209,7 +209,24 @@ export function ScannerPanel(): React.JSX.Element {
     try { await (window.api as any).invoke('scanner:start',{taskId:id}); } catch(e:any){ alert(e.message||String(e)); } refresh();
   };
   const viewTask = async(id:string)=>{ try { const r= await (window.api as any).invoke('scanner:get_task',{taskId:id}); setSelected(r); setResultFilter('all'); setPresenceFilter('all'); } catch(e:any){ alert(e.message||String(e)); } };
-  const doExport = async(id:string, filter:string, keyword?:string)=>{ try { const r= await (window.api as any).invoke('scanner:export',{taskId:id, filter, keyword: keyword || ''}); alert(`已导出[${r.filter || filter}] ${r.count} 条\n${r.filePath}`); } catch(e:any){ alert(e.message||String(e)); } };
+  const doExport = async(id:string, filter:string, keyword?:string)=>{
+    try {
+      const r= await (window.api as any).invoke('scanner:export',{taskId:id, filter, keyword: keyword || ''});
+      // 浏览器 Web 模式：直接下载 CSV 到本机；桌面端无下载通道，仍提示服务器路径
+      const tok = (()=>{ try { return localStorage.getItem('waam_token') || ''; } catch { return ''; } })();
+      const base = String(r.filePath || '').split(/[\\/]/).pop() || '';
+      if (tok && base) {
+        const a = document.createElement('a');
+        a.href = `/api/export-download?file=${encodeURIComponent(base)}&token=${encodeURIComponent(tok)}`;
+        a.download = base;
+        document.body.appendChild(a); a.click();
+        setTimeout(()=>{ if(a.parentNode) a.parentNode.removeChild(a); }, 1000);
+        alert(`已导出[${r.filter || filter}] ${r.count} 条，正在下载 ${base}`);
+      } else {
+        alert(`已导出[${r.filter || filter}] ${r.count} 条\n${r.filePath}`);
+      }
+    } catch(e:any){ alert(e.message||String(e)); }
+  };
   const delTask = async(id:string)=>{ if(!confirm('删除任务及结果？')) return; try { await (window.api as any).invoke('scanner:delete',{taskId:id}); } catch(e:any){ alert(e.message||String(e)); } refresh(); };
   const ctlTask = async(action:'pause'|'resume'|'abort', label:string)=>{
     try { await (window.api as any).invoke(`scanner:${action}`,{}); } catch(e:any){ alert(`${label}失败：`+(e.message||String(e))); } refresh();
