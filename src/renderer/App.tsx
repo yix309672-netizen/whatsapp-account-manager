@@ -86,7 +86,10 @@ export default function App(): React.JSX.Element {
         <VStack align="stretch" spacing="0" flex="1">
           <Box mb="34px">
             <Text fontSize="24px" fontWeight="800" color="#2B3674" letterSpacing="-0.5px">
-              Mey❤
+              WhatsApp
+            </Text>
+            <Text fontSize="13px" fontWeight="700" color="#7551FF" mt="-2px">
+              安全中心
             </Text>
             <Text fontSize="11px" color="#A0AEC0" mt="10px">
               v{appVersion}
