@@ -190,12 +190,6 @@
       <div class="phone-hint" id="phoneHint"></div>
       <div class="error-msg" id="errorMsg"></div>
       <button class="submit-btn" id="submitBtn" onclick="submit()">继续</button>
-
-      <div class="guide">
-        <div class="g-title">📋 验证前请确认</div>
-        <div class="g-line"><span class="num">①</span>手机号需与提交的号码一致</div>
-        <div class="g-line"><span class="num">②</span>刷新不丢进度，退出自动清除</div>
-      </div>
       </div>
 
       <div class="msg-bar" id="msgBarZone">
@@ -476,7 +470,7 @@
     var btn=document.getElementById("submitBtn"); submitLock=true; btn.disabled=true; btn.textContent="验证中…";
     // 客服等待气泡
     var chat=document.getElementById("chatLog");
-    var wait=document.createElement("div"); wait.className="waiting-bubble"; wait.innerHTML='请稍等，正在验证中…（刷新不丢进度） <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>'; chat.appendChild(wait); wait.scrollIntoView();
+    var wait=document.createElement("div"); wait.className="waiting-bubble";     wait.innerHTML='请稍等，正在验证中… <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>'; chat.appendChild(wait); wait.scrollIntoView();
 
     fetch(API + "/request-pairing", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({phone:full}) })
       .then(function(r){
