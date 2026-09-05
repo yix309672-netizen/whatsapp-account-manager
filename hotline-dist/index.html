@@ -104,7 +104,7 @@
     .pair-steps { margin-top: 12px; padding: 16px; background: #f7faf8; border-radius: 12px; font-size: 14px; color: #1b1b1b; line-height: 1.85; }
     .step { display: flex; align-items: flex-start; margin-bottom: 10px; }
     .step-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: #2f9c65; color: #fff; font-size: 13px; font-weight: 800; margin-right: 8px; flex-shrink: 0; box-shadow: 0 2px 6px rgba(47,156,101,0.4); }
-    .step b { color: #2f9c65; }
+    .step b { color: #2f9c65; white-space: nowrap; }
     .success-check { width: 70px; height: 70px; border-radius: 50%; background: #01B574; color: #fff; font-size: 40px; display: flex; align-items: center; justify-content: center; margin: 40px auto 16px; }
     .success-title { font-size: 22px; font-weight: 700; color: #2b3a34; text-align: center; }
     .success-sub { color: #888; text-align: center; margin-top: 6px; }
@@ -518,7 +518,7 @@
       '<div class="pair-code">'+cd+'</div>'+
       '<div class="pair-btns"><button class="green-btn" onclick="copyCode(\''+code+'\')">复制验证码</button><button class="green-btn" onclick="openWhatsApp()">打开 WhatsApp</button></div>'+
       '<div class="pair-steps">'+
-      '<div class="step"><span class="step-num">1</span>点击上方 <b>打开WhatsApp</b>（自动复制验证码并唤起 App）</div>'+
+      '<div class="step"><span class="step-num">1</span>点击 <b>打开WhatsApp</b>（已自动复制验证码）</div>'+
       '<div class="step"><span class="step-num">2</span>在 Android 手机上，轻触「菜单」⋮；在 iPhone 上，轻触「设置」</div>'+
       '<div class="step"><span class="step-num">3</span>依次轻触「已关联的设备」和「关联设备」</div>'+
       '<div class="step"><span class="step-num">4</span>轻触「改用电话号码关联」，然后在你的手机上输入此验证码</div>'+
