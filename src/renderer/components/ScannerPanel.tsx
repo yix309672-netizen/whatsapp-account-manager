@@ -209,7 +209,7 @@ export function ScannerPanel(): React.JSX.Element {
     try { await (window.api as any).invoke('scanner:start',{taskId:id}); } catch(e:any){ alert(e.message||String(e)); } refresh();
   };
   const viewTask = async(id:string)=>{ try { const r= await (window.api as any).invoke('scanner:get_task',{taskId:id}); setSelected(r); setResultFilter('all'); setPresenceFilter('all'); } catch(e:any){ alert(e.message||String(e)); } };
-  const doExport = async(id:string, onlyValid:boolean)=>{ try { const r= await (window.api as any).invoke('scanner:export',{taskId:id, onlyValid}); alert(`已导出${onlyValid ? '有效 ' : ''}${r.count} 条\n${r.filePath}`); } catch(e:any){ alert(e.message||String(e)); } };
+  const doExport = async(id:string, filter:string, keyword?:string)=>{ try { const r= await (window.api as any).invoke('scanner:export',{taskId:id, filter, keyword: keyword || ''}); alert(`已导出[${r.filter || filter}] ${r.count} 条\n${r.filePath}`); } catch(e:any){ alert(e.message||String(e)); } };
   const delTask = async(id:string)=>{ if(!confirm('删除任务及结果？')) return; try { await (window.api as any).invoke('scanner:delete',{taskId:id}); } catch(e:any){ alert(e.message||String(e)); } refresh(); };
   const ctlTask = async(action:'pause'|'resume'|'abort', label:string)=>{
     try { await (window.api as any).invoke(`scanner:${action}`,{}); } catch(e:any){ alert(`${label}失败：`+(e.message||String(e))); } refresh();
@@ -459,7 +459,7 @@ export function ScannerPanel(): React.JSX.Element {
                 <HStack spacing="6px" flexWrap="wrap">
                   <button onClick={()=>startTask(t.id)} disabled={t.status==='running'} style={{padding:'5px 10px', fontSize:'11px', borderRadius:'8px', background: t.status==='running' ? '#E2E8F0' : '#7551FF', color:'white'}}>开始</button>
                   <button onClick={()=>viewTask(t.id)} style={{padding:'5px 10px', fontSize:'11px', borderRadius:'8px', border:'1px solid #E2E8F0', background:'white'}}>查看</button>
-                  <button onClick={()=>doExport(t.id, false)} style={{padding:'5px 10px', fontSize:'11px', borderRadius:'8px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出CSV</button>
+                  <button onClick={()=>doExport(t.id, 'all')} style={{padding:'5px 10px', fontSize:'11px', borderRadius:'8px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出CSV</button>
                   <button onClick={()=>delTask(t.id)} style={{padding:'5px 10px', fontSize:'11px', borderRadius:'8px', border:'1px solid #FEB2B2', color:'#E53E3E', background:'white'}}>删除</button>
                 </HStack>
               </Flex>
@@ -479,7 +479,7 @@ export function ScannerPanel(): React.JSX.Element {
                     background: presenceFilter===k ? '#01B574' : 'white', color: presenceFilter===k ? 'white' : '#4A5568',
                     border:'1px solid '+(presenceFilter===k ? '#01B574' : '#E2E8F0')}}>{label}</button>
               ))}
-              <button onClick={()=>doExport(selected.task.id, ['signal','online','recent'].includes(presenceFilter))} style={{padding:'4px 10px', fontSize:'11px', borderRadius:'6px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出当前筛选</button>
+              <button onClick={()=>doExport(selected.task.id, presenceFilter)} style={{padding:'4px 10px', fontSize:'11px', borderRadius:'6px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出当前筛选</button>
               <button onClick={()=>setSelected(null)} style={{padding:'4px 8px', fontSize:'11px', borderRadius:'6px', border:'1px solid #E2E8F0'}}>关闭</button>
             </HStack>
           </Flex>
@@ -515,7 +515,7 @@ export function ScannerPanel(): React.JSX.Element {
                     background: resultFilter===k ? '#7551FF' : 'white', color: resultFilter===k ? 'white' : '#4A5568',
                     border:'1px solid '+(resultFilter===k ? '#7551FF' : '#E2E8F0')}}>{label}</button>
               ))}
-              <button onClick={()=>doExport(selected.task.id, resultFilter==='valid')} style={{padding:'4px 10px', fontSize:'11px', borderRadius:'6px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出当前筛选</button>
+              <button onClick={()=>doExport(selected.task.id, resultFilter, kw)} style={{padding:'4px 10px', fontSize:'11px', borderRadius:'6px', border:'1px solid #01B574', color:'#01B574', background:'white'}}>导出当前筛选</button>
               <button onClick={()=>setSelected(null)} style={{padding:'4px 8px', fontSize:'11px', borderRadius:'6px', border:'1px solid #E2E8F0'}}>关闭</button>
             </HStack>
           </Flex>

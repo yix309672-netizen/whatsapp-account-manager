@@ -1242,14 +1242,20 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     }
     case 'scanner:export': {
       const tid = params.taskId as string;
+      // filter 与前端筛选项严格对齐；keyword 匹配号码/签名/昵称；onlyValid 为兼容老调用
+      const filter = String(params.filter || (params.onlyValid ? 'valid' : 'all'));
+      const keyword = String(params.keyword || '').trim().slice(0, 64);
+      const kwLike = `%${keyword.replace(/[%_\\]/g, '')}%`;
       const t0 = db.prepare('SELECT kind FROM scanner_tasks WHERE id=?').get(tid) as { kind: string } | undefined;
       if ((t0?.kind || 'register') === 'presence') {
-        const onlySignal = !!params.onlyValid;
+        let where = 'task_id=?';
+        const args: unknown[] = [tid];
+        if (filter === 'signal') where += ` AND status IN ('online','recent')`;
+        else if (['online', 'recent', 'hidden', 'unregistered', 'error'].includes(filter)) { where += ' AND status=?'; args.push(filter); }
+        if (keyword) { where += ' AND phone LIKE ?'; args.push(kwLike); }
         const rows = db.prepare(
-          onlySignal
-            ? "SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? AND status IN ('online','recent') ORDER BY created_at"
-            : 'SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at'
-        ).all(tid) as any[];
+          `SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE ${where} ORDER BY created_at`
+        ).all(...args) as any[];
         const statusZh = (s: string) => s === 'online' ? '在线' : s === 'recent' ? '近期活跃' : s === 'hidden' ? '无信号' : s === 'unregistered' ? '未开通' : s === 'error' ? '异常' : s;
         const header = '\uFEFF号码,活跃状态,最后在线,checker,错误\n';
         const body = rows.map((r: any) => `${r.phone},${statusZh(r.status)},${r.last_seen ? new Date(r.last_seen * 1000).toLocaleString() : ''},${r.checker_id ?? ''},${(r.error || '').replace(/,/g, ' ')}`).join('\n');
@@ -1257,16 +1263,18 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         const { writeFileSync, existsSync, mkdirSync } = await import('fs');
         const dir = join(app.getPath('userData'), 'exports');
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        const fp = join(dir, `presence-${String(tid).slice(0, 8)}-${Date.now()}.csv`);
+        const fp = join(dir, `presence-${String(tid).slice(0, 8)}-${filter}-${Date.now()}.csv`);
         writeFileSync(fp, header + body, 'utf8');
-        return { success: true, filePath: fp, count: rows.length };
+        return { success: true, filePath: fp, count: rows.length, filter };
       }
-      const onlyValid = !!params.onlyValid;
+      let where = 'task_id=?';
+      const args: unknown[] = [tid];
+      if (filter === 'valid') where += ' AND exists_flag=1';
+      else if (filter === 'invalid') where += ' AND exists_flag=0';
+      if (keyword) { where += ' AND (phone LIKE ? OR status_msg LIKE ? OR pushname LIKE ?)'; args.push(kwLike, kwLike, kwLike); }
       const rows = db.prepare(
-        onlyValid
-          ? 'SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? AND exists_flag=1 ORDER BY created_at'
-          : 'SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? ORDER BY created_at'
-      ).all(tid) as any[];
+        `SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE ${where} ORDER BY created_at`
+      ).all(...args) as any[];
       const esc = (s: string) => String(s || '').replace(/,/g, ' ').replace(/[\r\n]+/g, ' ');
       const header = '\uFEFF号码,是否开通,是否有头像,头像URL,个性签名,昵称,错误\n';
       const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${esc(r.error)}`).join('\n');
@@ -1275,9 +1283,9 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       const { writeFileSync, existsSync, mkdirSync } = await import('fs');
       const dir = join(app.getPath('userData'), 'exports');
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const fp = join(dir, `scan-${tid.slice(0,8)}-${Date.now()}.csv`);
+      const fp = join(dir, `scan-${tid.slice(0,8)}-${filter}-${Date.now()}.csv`);
       writeFileSync(fp, csv, 'utf8');
-      return { success: true, filePath: fp, count: rows.length };
+      return { success: true, filePath: fp, count: rows.length, filter };
     }
     case 'scanner:pairing_code': {
       const phone = String(params.phone || params.phoneNumber || '').trim();
