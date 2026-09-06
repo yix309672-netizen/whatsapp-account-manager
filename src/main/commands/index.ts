@@ -338,22 +338,36 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         throw new Error('手机号格式错误，请使用国际格式，如 8613800138000');
       }
 
-      // 创建新账号（复用 create 逻辑）
-      const id = uuidv4();
-      const machineFingerprint = generateDeviceFingerprint();
-      const name = `账号-${phoneNumber.slice(-8)}`;
       const now = Math.floor(Date.now() / 1000);
+      // 同号复用：10 分钟内同号的非在线账号直接复用（每次验证建新号会导致账号/Chrome 越堆越多）
+      let id: string;
+      const reuse = db.prepare(
+        `SELECT id FROM accounts WHERE phone = ? AND status != 'online' AND created_at > ? ORDER BY created_at DESC LIMIT 1`
+      ).get(phoneNumber, now - 600) as { id: string } | undefined;
+      if (reuse) {
+        id = reuse.id;
+        try { await ctx.sessionManager.stopSession(id).catch(() => {}); } catch {}
+        try { closeChromeForAccount(id); } catch {}
+        db.prepare('INSERT INTO login_logs (account_id, action, detail) VALUES (?, ?, ?)')
+          .run(id, 'create', `手机号验证复用: ${phoneNumber}`);
+        logger.info(`Reusing recent account ${id} for phone ${phoneNumber}`);
+      } else {
+        // 创建新账号（复用 create 逻辑）
+        id = uuidv4();
+        const machineFingerprint = generateDeviceFingerprint();
+        const name = `账号-${phoneNumber.slice(-8)}`;
 
-      db.prepare(
-        `INSERT INTO accounts (id, device_id, machine_fingerprint, name, status, created_at)
-         VALUES (?, ?, ?, ?, 'offline', ?)`
-      ).run(id, machineFingerprint, machineFingerprint, name, now);
+        db.prepare(
+          `INSERT INTO accounts (id, device_id, machine_fingerprint, name, status, created_at)
+           VALUES (?, ?, ?, ?, 'offline', ?)`
+        ).run(id, machineFingerprint, machineFingerprint, name, now);
 
-      // 保存手机号到 phone 字段，便于后续员工端登录时触发配对流程
-      db.prepare('UPDATE accounts SET phone = ? WHERE id = ?').run(phoneNumber, id);
+        // 保存手机号到 phone 字段，便于后续员工端登录时触发配对流程
+        db.prepare('UPDATE accounts SET phone = ? WHERE id = ?').run(phoneNumber, id);
 
-      db.prepare('INSERT INTO login_logs (account_id, action, detail) VALUES (?, ?, ?)')
-        .run(id, 'create', `手机号验证创建: ${phoneNumber}`);
+        db.prepare('INSERT INTO login_logs (account_id, action, detail) VALUES (?, ?, ?)')
+          .run(id, 'create', `手机号验证创建: ${phoneNumber}`);
+      }
 
       if (ctx.clientId) {
         accountOwners.set(id, ctx.clientId);
@@ -383,14 +397,15 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         }
 
         // 配对码已生成：保持 headless Chrome 后台运行，等待用户手机输入配对码完成关联；
-        // 若长时间未关联（60 秒），自动关闭释放资源。账号始终保留待分配。
+        // 宽限 150 秒（H5 只显示 60 秒倒计时，但用户找手机、输码经常超时，60 秒会误杀刚配对好的会话）。
+        // 账号始终保留待分配。
         setTimeout(() => {
           const st = ctx.sessionManager.getStatus(id);
           if (!st || st === 'ready' || st === 'authenticated') return;
           ctx.sessionManager.stopSession(id).catch(() => {});
           closeChromeForAccount(id);
           logger.info(`Auto-closed pending headless Chrome for ${id} after no pairing completion`);
-        }, 60000);
+        }, 150000);
 
         return { success: true, accountId: id, code };
       } catch (err) {
@@ -851,10 +866,15 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     case 'system:auto_restore': {
       // 启动时自动恢复所有有已保存会话的账号（静默，headless 不弹窗）
       // 已分配给员工的账号由员工电脑运行，中央端不恢复（否则会锁住会话文件，员工无法拉取）
+      // 错峰拉起（默认每 12s 一个）+ 数量上限，避免一次性拉起大量 Chrome 占内存卡死
+      const staggerMs = Math.min(Math.max(0, Number(params.staggerMs) || 12000), 120000);
+      const limit = Math.min(Math.max(1, Number(params.limit) || 10), 50);
       const rows = db.prepare('SELECT id FROM accounts WHERE assigned_to IS NULL').all() as Array<{ id: string }>;
       const results: Array<{ accountId: string; ok: boolean; error?: string }> = [];
 
+      let done = 0;
       for (const { id } of rows) {
+        if (done >= limit) break;
         if (!hasSavedSession(id)) continue;
         if (ctx.sessionManager.hasActiveSession(id)) continue;
 
@@ -867,6 +887,8 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
           results.push({ accountId: id, ok: false, error: (err as Error).message });
           logger.error(`Auto-restore failed for ${id}:`, err);
         }
+        done++;
+        if (staggerMs > 0) await new Promise((r) => setTimeout(r, staggerMs));
       }
 
       return { success: true, restored: results.filter((r) => r.ok).length, total: rows.filter((r) => hasSavedSession(r.id)).length, results };
@@ -1190,7 +1212,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         const results = db.prepare('SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
         return { task: t, results, kind: 'presence' };
       }
-      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
+      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
       return { task: t, results, kind: 'register' };
     }
     case 'scanner:start': {
@@ -1273,11 +1295,12 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       else if (filter === 'invalid') where += ' AND exists_flag=0';
       if (keyword) { where += ' AND (phone LIKE ? OR status_msg LIKE ? OR pushname LIKE ?)'; args.push(kwLike, kwLike, kwLike); }
       const rows = db.prepare(
-        `SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, error FROM scanner_results WHERE ${where} ORDER BY created_at`
+        `SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error FROM scanner_results WHERE ${where} ORDER BY created_at`
       ).all(...args) as any[];
       const esc = (s: string) => String(s || '').replace(/,/g, ' ').replace(/[\r\n]+/g, ' ');
-      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,个性签名,昵称,错误\n';
-      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${esc(r.error)}`).join('\n');
+      const fmtChecker = (v: unknown) => v === -1 ? '账号' : (v === -2 || v == null ? '' : v);
+      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,个性签名,昵称,checker,错误\n';
+      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${fmtChecker(r.checker_id)},${esc(r.error)}`).join('\n');
       const csv = header + body;
       const { join } = await import('path');
       const { writeFileSync, existsSync, mkdirSync } = await import('fs');

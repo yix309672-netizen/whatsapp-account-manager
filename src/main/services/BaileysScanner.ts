@@ -178,12 +178,19 @@ async function sleepInterruptible(ms: number): Promise<'done' | 'aborted'> {
   }
   return abortFlag ? 'aborted' : 'done';
 }
-// 强制冷却等待：cooldownUntil 到期前只睡觉不查号（掉线/解封后的保号期，可被中止打断）
-async function waitCooldown(c: Checker, taskId: string): Promise<boolean> {
-  const wait = c.cooldownUntil - Date.now();
-  if (wait <= 0) return true;
-  logger.info(`[BaileysScanner] task ${taskId} checker #${c.id} cooling down ${Math.round(wait / 1000)}s`);
-  if ((await sleepInterruptible(wait)) === 'aborted') { pauseTask(taskId); return false; }
+// 强制冷却等待：cooldownUntil 到期前只睡觉不查号（掉线/解封后的保号期，可被中止打断）。
+// 冷却期间队列空了就直接收工（别睡满 30 分钟拖住任务收尾；补查轮会起新 worker）。
+async function waitCooldown(c: Checker, taskId: string, queue?: { length: number }): Promise<boolean> {
+  while (c.cooldownUntil - Date.now() > 0) {
+    if (abortFlag) { pauseTask(taskId); return false; }
+    while (paused) {
+      await delay(1000);
+      if (abortFlag) return false;
+    }
+    if (queue && queue.length === 0) return false;
+    logger.info(`[BaileysScanner] task ${taskId} checker #${c.id} cooling down ${Math.round((c.cooldownUntil - Date.now()) / 1000)}s`);
+    if ((await sleepInterruptible(Math.min(5000, c.cooldownUntil - Date.now()))) === 'aborted') { pauseTask(taskId); return false; }
+  }
   return true;
 }
 // 查询超时保护：WA 偶发不回包，无超时会卡死整个任务
@@ -544,124 +551,112 @@ async function readTaskProgress(taskId: string): Promise<{ done: number; total: 
   return { done: t?.done || 0, total: t?.total || 0, valid: t?.valid_count || 0, invalid: t?.invalid_count || 0 };
 }
 
-// 单个 checker 的注册分片循环（含本分片出错补查）
-async function runRegisterShard(checkerId: number, taskId: string, phones: string[], cfg: ScanCfg): Promise<void> {
+// 共享队列 worker：池内 checker 谁空谁取，按号轮询；触上限/冷却的自动靠边睡到窗口重置后归队，
+// 掉线的号取不到号（checkOne 直接抛错记失败），它的活自然被别的号拿走。
+// 同一任务同时只跑一个（全局 currentTaskId），保号优先。
+interface QueueItem { raw: string; rid: string | null }
+
+async function registerWorker(checkerId: number, taskId: string, queue: QueueItem[], cfg: ScanCfg, retryRound = 0): Promise<void> {
   const c = getChecker(checkerId);
   const db = getDb();
-  const retryQueue: Array<{ raw: string; rid: string }> = [];
-  let shardDone = 0;
+  let myDone = 0;
 
-  const processOne = async (raw: string): Promise<{ ok: boolean; err?: string; queries: number }> => {
-    let r: { exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string; statusMsg: string };
-    try {
-      r = await checkOne(c, raw, cfg);
-    } catch (e: any) {
-      return { ok: false, err: String(e?.message || e).slice(0, 200), queries: 1 };
-    }
-    // 按实际请求折算配额：查号1 + 头像1 + 签名1（只计实际发出的）
-    const queries = 1 + (r.exists && cfg.checkAvatar ? 1 : 0) + (r.exists && cfg.checkStatusMsg ? 1 : 0);
-    const rid = uuidv4();
-    db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(rid, taskId, raw, r.jid, r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', '', Math.floor(Date.now() / 1000));
-    db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
-      .run(r.exists ? 1 : 0, r.exists ? 0 : 1, taskId);
-    return { ok: true, queries };
-  };
-
-  for (let i = 0; i < phones.length; i++) {
+  for (;;) {
     if (abortFlag) { pauseTask(taskId); return; }
     while (paused) {
       await delay(1000);
       if (abortFlag) return;
     }
-    // 小时上限（每 checker 独立窗口）：到点自动熔断暂停整个任务，需手动继续（保护通道号）
+    if (!(await waitCooldown(c, taskId, queue))) return;
+    // 队列空了就收工（队列只减不增，同步判断无竞态）
+    if (queue.length === 0) return;
+    // 小时上限（每 checker 独立窗口）：到点不退出不熔断，切片小睡等窗口重置后归队，活先给别的号干；
+    // 等待期间队列空了就收工（别睡满一小时拖住任务收尾）
     if (cfg.hourlyCap > 0) {
       const nowH = Date.now();
       if (!c.windowStart || nowH - c.windowStart >= 3600000) { c.windowStart = nowH; c.windowCount = 0; }
       if (c.windowCount >= cfg.hourlyCap) {
-        pauseTask(taskId, `checker #${checkerId} 触发小时上限（${cfg.hourlyCap}/时），已自动暂停，冷却后点 开始 继续（断点保留）`);
-        return;
+        const deadline = c.windowStart + 3600000;
+        logger.info(`[BaileysScanner] task ${taskId} checker #${checkerId} hourly cap hit, yielding till window reset`);
+        broadcast('scanner:progress', { taskId, phone: '', exists: false, hasAvatar: false, checkerId, resting: Math.max(Math.round((deadline - Date.now()) / 1000), 1), yielding: true, retryRound: retryRound || undefined });
+        for (;;) {
+          if (abortFlag) { pauseTask(taskId); return; }
+          while (paused) {
+            await delay(1000);
+            if (abortFlag) return;
+          }
+          if (queue.length === 0) return;
+          if (Date.now() >= deadline) break;
+          if ((await sleepInterruptible(Math.min(5000, deadline - Date.now()))) === 'aborted') { pauseTask(taskId); return; }
+        }
+        continue;
       }
     }
-    const raw = phones[i];
-    if (!(await waitCooldown(c, taskId))) return;
-    const res = await processOne(raw);
-    c.windowCount += res.queries || 1;
-    if (!res.ok) {
-      // 失败记一行（供补查），计数照常 +1（done 含失败，避免 resume 死循环）
-      const rid = uuidv4();
-      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(rid, taskId, raw, `${raw}@s.whatsapp.net`, 0, 0, '', '', '', res.err || '', Math.floor(Date.now() / 1000));
-      db.prepare(`UPDATE scanner_tasks SET done=done+1, invalid_count=invalid_count+1 WHERE id=?`).run(taskId);
-      retryQueue.push({ raw, rid });
-      // 连续失败熔断：大概率被限流/掉线，自动暂停保号（断点保留）
-      const recentErrs = db.prepare(`SELECT COUNT(*) c FROM scanner_results WHERE task_id=? AND error<>'' AND created_at>?`).get(taskId, Math.floor(Date.now() / 1000) - 600) as any;
-      if ((recentErrs?.c || 0) >= cfg.maxConsecErr) {
-        pauseTask(taskId, `checker #${checkerId} 10分钟内失败 ${recentErrs.c} 次（${(res.err || '').slice(0, 60)}），已熔断暂停，冷却后点 开始 继续（断点保留）`);
-        return;
-      }
-      if ((await sleepInterruptible(5000)) === 'aborted') { pauseTask(taskId); return; }
-    }
-    shardDone++;
-    const p = await readTaskProgress(taskId);
-    // 取本号结果用于展示
-    const row = db.prepare(`SELECT exists_flag, has_avatar FROM scanner_results WHERE task_id=? AND phone=? ORDER BY created_at DESC LIMIT 1`).get(taskId, raw) as any;
-    broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: raw, exists: !!row?.exists_flag, hasAvatar: !!row?.has_avatar, checkerId });
+    const item = queue.shift();
+    if (!item) return;
+    myDone++;
 
-    // 防风控间隔：单号随机抖动 + 整批休眠（按本分片计数）
-    if (shardDone < phones.length) {
-      if (shardDone % cfg.batchSize === 0) {
-        const rest = getRandomDelay(cfg.batchRestMinMs, cfg.batchRestMaxMs);
-        broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: raw, exists: !!row?.exists_flag, hasAvatar: !!row?.has_avatar, checkerId, resting: Math.round(rest / 1000) });
-        logger.info(`[BaileysScanner] task ${taskId} checker #${checkerId} batch rest ${Math.round(rest / 1000)}s after ${shardDone}/${phones.length}`);
-        if ((await sleepInterruptible(rest)) === 'aborted') { pauseTask(taskId); return; }
+    let r: { exists: boolean; hasAvatar: boolean; avatarUrl: string; jid: string; statusMsg: string } | null = null;
+    let err = '';
+    try {
+      r = await checkOne(c, item.raw, cfg);
+    } catch (e: any) {
+      err = String(e?.message || e).slice(0, 200);
+    }
+    // 按实际请求折算配额：查号1 + 头像1 + 签名1（失败只计1）
+    const queries = r ? 1 + (r.exists && cfg.checkAvatar ? 1 : 0) + (r.exists && cfg.checkStatusMsg ? 1 : 0) : 1;
+    c.windowCount += queries;
+
+    if (r) {
+      if (!item.rid) {
+        const rid = uuidv4();
+        db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(rid, taskId, item.raw, r.jid, r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', checkerId, '', Math.floor(Date.now() / 1000));
+        db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
+          .run(r.exists ? 1 : 0, r.exists ? 0 : 1, taskId);
       } else {
-        if ((await sleepInterruptible(getRandomDelay(cfg.minMs, cfg.maxMs))) === 'aborted') { pauseTask(taskId); return; }
-      }
-    }
-  }
-
-  // 本分片出错自动补查：冷却后只重查报错号码（按 rid 直接 UPDATE）
-  for (let round = 1; round <= cfg.retryRounds && retryQueue.length > 0; round++) {
-    if (abortFlag) { pauseTask(taskId); return; }
-    const p0 = await readTaskProgress(taskId);
-    broadcast('scanner:progress', { taskId, done: p0.done, total: p0.total, valid: p0.valid, invalid: p0.invalid, phone: '', exists: false, hasAvatar: false, checkerId, resting: Math.round(cfg.retryCooldownMs / 1000), retryRound: round });
-    logger.info(`[BaileysScanner] task ${taskId} checker #${checkerId} retry round ${round}: ${retryQueue.length} error numbers after ${Math.round(cfg.retryCooldownMs / 1000)}s cooldown`);
-    if ((await sleepInterruptible(cfg.retryCooldownMs)) === 'aborted') { pauseTask(taskId); return; }
-    if (cfg.hourlyCap > 0 && c.windowCount >= cfg.hourlyCap) {
-      pauseTask(taskId, `checker #${checkerId} 补查前触发小时上限（${cfg.hourlyCap}/时），已自动暂停，冷却后点 开始 继续（断点保留）`);
-      return;
-    }
-    const batch = retryQueue.splice(0, retryQueue.length);
-    for (const item of batch) {
-      if (abortFlag) { pauseTask(taskId); return; }
-      while (paused) {
-        await delay(1000);
-        if (abortFlag) return;
-      }
-      if (!(await waitCooldown(c, taskId))) return;
-      try {
-        const r = await checkOne(c, item.raw, cfg);
-        c.windowCount += 1 + (r.exists && cfg.checkAvatar ? 1 : 0) + (r.exists && cfg.checkStatusMsg ? 1 : 0);
         const old = db.prepare('SELECT exists_flag FROM scanner_results WHERE id=?').get(item.rid) as any;
         db.prepare('UPDATE scanner_results SET exists_flag=?, has_avatar=?, avatar_url=?, status_msg=?, error=?, jid=? WHERE id=?')
           .run(r.exists ? 1 : 0, r.hasAvatar ? 1 : 0, r.avatarUrl, r.statusMsg, '', r.jid, item.rid);
         if (r.exists && !old?.exists_flag) {
           db.prepare('UPDATE scanner_tasks SET valid_count=valid_count+1, invalid_count=invalid_count-1 WHERE id=?').run(taskId);
         }
-        const p = await readTaskProgress(taskId);
-        broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: item.raw, exists: r.exists, hasAvatar: r.hasAvatar, checkerId, retryRound: round });
-      } catch (e: any) {
-        c.windowCount += 1;
-        const msg = String(e?.message || e).slice(0, 200);
-        db.prepare('UPDATE scanner_results SET error=? WHERE id=?').run(msg, item.rid);
-        if (round >= cfg.retryRounds) {
-          logger.warn(`[BaileysScanner] task ${taskId} checker #${checkerId} retry exhausted for ${item.raw}: ${msg.slice(0, 60)}`);
-        } else {
-          retryQueue.push(item);
-        }
       }
-      if ((await sleepInterruptible(getRandomDelay(cfg.minMs, cfg.maxMs))) === 'aborted') { pauseTask(taskId); return; }
+    } else {
+      if (!item.rid) {
+        // 失败记一行（供补查），计数照常 +1（done 含失败，避免 resume 死循环）
+        const rid = uuidv4();
+        db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(rid, taskId, item.raw, `${item.raw}@s.whatsapp.net`, 0, 0, '', '', '', checkerId, err, Math.floor(Date.now() / 1000));
+        db.prepare(`UPDATE scanner_tasks SET done=done+1, invalid_count=invalid_count+1 WHERE id=?`).run(taskId);
+      } else {
+        db.prepare('UPDATE scanner_results SET error=? WHERE id=?').run(err, item.rid);
+      }
+      // 连续失败熔断（按号隔离统计：只看本 checker 自己 10 分钟内的失败，别人的错不连累）：
+      // 大概率被限流/掉线，自动暂停保号（断点保留）
+      const recentErrs = db.prepare(`SELECT COUNT(*) c FROM scanner_results WHERE task_id=? AND checker_id=? AND error<>'' AND created_at>?`).get(taskId, checkerId, Math.floor(Date.now() / 1000) - 600) as any;
+      if ((recentErrs?.c || 0) >= cfg.maxConsecErr) {
+        pauseTask(taskId, `checker #${checkerId} 10分钟内失败 ${recentErrs.c} 次（${err.slice(0, 60)}），已熔断暂停，冷却后点 开始 继续（断点保留）`);
+        return;
+      }
+      if ((await sleepInterruptible(5000)) === 'aborted') { pauseTask(taskId); return; }
+    }
+
+    const p = await readTaskProgress(taskId);
+    // 取本号结果用于展示
+    const row = db.prepare(`SELECT exists_flag, has_avatar FROM scanner_results WHERE task_id=? AND phone=? ORDER BY created_at DESC LIMIT 1`).get(taskId, item.raw) as any;
+    broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: item.raw, exists: !!row?.exists_flag, hasAvatar: !!row?.has_avatar, checkerId, retryRound: retryRound || undefined });
+
+    // 防风控间隔：单号随机抖动 + 整批休眠（按本 worker 计数，各号自然错峰）
+    if (queue.length > 0) {
+      if (myDone % cfg.batchSize === 0) {
+        const rest = getRandomDelay(cfg.batchRestMinMs, cfg.batchRestMaxMs);
+        broadcast('scanner:progress', { taskId, done: p.done, total: p.total, valid: p.valid, invalid: p.invalid, phone: item.raw, exists: !!row?.exists_flag, hasAvatar: !!row?.has_avatar, checkerId, resting: Math.round(rest / 1000), retryRound: retryRound || undefined });
+        logger.info(`[BaileysScanner] task ${taskId} checker #${checkerId} batch rest ${Math.round(rest / 1000)}s after ${myDone} own queries`);
+        if ((await sleepInterruptible(rest)) === 'aborted') { pauseTask(taskId); return; }
+      } else {
+        if ((await sleepInterruptible(getRandomDelay(cfg.minMs, cfg.maxMs))) === 'aborted') { pauseTask(taskId); return; }
+      }
     }
   }
 }
@@ -685,15 +680,26 @@ export async function runScanTask(taskId: string): Promise<void> {
   broadcast('scanner:task', { id: taskId, status: 'running', checkers: online });
   try {
     const numbers: string[] = JSON.parse(task.phones_json as string);
-    // resume：跳过已有结果的号码（断点保留，分片天然支持）
+    // resume：跳过已有结果的号码（断点保留，共享队列天然支持）
     const existing = new Set((db.prepare('SELECT phone FROM scanner_results WHERE task_id=?').all(taskId) as any[]).map((r) => String(r.phone)));
-    const queue = numbers.map((p) => String(p).replace(/[^0-9]/g, '')).filter((p) => p && !existing.has(p));
+    const pending = numbers.map((p) => String(p).replace(/[^0-9]/g, '')).filter((p) => p && !existing.has(p));
     const cfg = getScanCfg();
-    logger.info(`[BaileysScanner] task ${taskId} start kind=register with ${online.length} checkers, ${queue.length} pending (total ${numbers.length}) cfg ${cfg.mode} ${cfg.minMs}-${cfg.maxMs}ms`);
-    // 轮询分片：号码均匀摊到在线 checker
-    const shards: string[][] = online.map(() => []);
-    queue.forEach((p, i) => { shards[i % shards.length].push(p); });
-    await Promise.all(shards.map((phones, k) => runRegisterShard(online[k], taskId, phones, cfg)));
+    logger.info(`[BaileysScanner] task ${taskId} start kind=register shared queue with ${online.length} checkers [${online.join(',')}], ${pending.length} pending (total ${numbers.length}) cfg ${cfg.mode} ${cfg.minMs}-${cfg.maxMs}ms`);
+    const runWorkers = (queue: QueueItem[], retryRound = 0): Promise<void[]> =>
+      Promise.all(online.map((id) => registerWorker(id, taskId, queue, cfg, retryRound)));
+    // 主轮：共享队列，谁空谁取
+    await runWorkers(pending.map((raw) => ({ raw, rid: null })));
+    // 出错自动补查：冷却后把报错号码重新装回共享队列（按 rid 直接 UPDATE，不断点从头来）
+    for (let round = 1; round <= cfg.retryRounds; round++) {
+      if (abortFlag) { pauseTask(taskId); break; }
+      const errs = db.prepare("SELECT id AS rid, phone AS raw FROM scanner_results WHERE task_id=? AND error<>''").all(taskId) as Array<{ rid: string; raw: string }>;
+      if (errs.length === 0) break;
+      const p0 = await readTaskProgress(taskId);
+      broadcast('scanner:progress', { taskId, done: p0.done, total: p0.total, valid: p0.valid, invalid: p0.invalid, phone: '', exists: false, hasAvatar: false, resting: Math.round(cfg.retryCooldownMs / 1000), retryRound: round });
+      logger.info(`[BaileysScanner] task ${taskId} retry round ${round}: ${errs.length} error numbers after ${Math.round(cfg.retryCooldownMs / 1000)}s cooldown`);
+      if ((await sleepInterruptible(cfg.retryCooldownMs)) === 'aborted') { pauseTask(taskId); break; }
+      await runWorkers(errs.map((e) => ({ raw: String(e.raw), rid: String(e.rid) })), round);
+    }
     // 收尾判定：abort 优先（覆盖"暂停中被中止"的竞态，此时分片直接返回、状态仍是 running，
     // 若不处理会被误判为 completed）；否则 running 才算正常跑完
     if (abortFlag) {
@@ -800,8 +806,8 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
       // Web 通道同样按实际请求折算配额
       webCount += 1 + (exists && cfg.checkAvatar && avatarUrl ? 1 : 0) + (exists && cfg.checkStatusMsg && statusMsg ? 1 : 0);
       const rid = uuidv4();
-      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(rid, taskId, raw, outJid, exists ? 1 : 0, hasAvatar ? 1 : 0, avatarUrl, statusMsg, pushname, error, Math.floor(Date.now() / 1000));
+      db.prepare(`INSERT INTO scanner_results (id, task_id, phone, jid, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(rid, taskId, raw, outJid, exists ? 1 : 0, hasAvatar ? 1 : 0, avatarUrl, statusMsg, pushname, -1, error, Math.floor(Date.now() / 1000));
       db.prepare(`UPDATE scanner_tasks SET done=done+1, valid_count=valid_count+?, invalid_count=invalid_count+? WHERE id=?`)
         .run(exists ? 1 : 0, exists ? 0 : 1, taskId);
       const p = await readTaskProgress(taskId);

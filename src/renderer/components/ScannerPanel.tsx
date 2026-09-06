@@ -543,7 +543,7 @@ export function ScannerPanel(): React.JSX.Element {
           </HStack>
           <Box maxH="300px" overflowY="auto" mt="8px" fontSize="11px">
             <table style={{width:'100%', borderCollapse:'collapse'}}>
-              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>头像</th><th style={{textAlign:'left'}}>签名</th><th style={{textAlign:'left'}}>昵称</th><th>错误</th></tr></thead>
+              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>头像</th><th style={{textAlign:'left'}}>签名</th><th style={{textAlign:'left'}}>昵称</th><th>#</th><th>错误</th></tr></thead>
               <tbody>
                 {selected.results.filter((r:any)=>{
                   if (!(resultFilter==='all' ? true : resultFilter==='valid' ? r.exists_flag : !r.exists_flag)) return false;
@@ -551,7 +551,7 @@ export function ScannerPanel(): React.JSX.Element {
                   const k = kw.trim().toLowerCase();
                   return String(r.phone||'').includes(k) || String(r.status_msg||'').toLowerCase().includes(k) || String(r.pushname||'').toLowerCase().includes(k);
                 }).map((r:any,i:number)=>(
-                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', maxWidth:'180px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.status_msg || ''}</td><td style={{fontSize:'10px', maxWidth:'120px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.pushname || ''}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
+                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', maxWidth:'180px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.status_msg || ''}</td><td style={{fontSize:'10px', maxWidth:'120px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.pushname || ''}</td><td style={{textAlign:'center', fontSize:'10px', color:'#718096'}}>{r.checker_id === -1 ? '账号' : (r.checker_id === -2 || r.checker_id == null ? '' : r.checker_id)}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
                 ))}
               </tbody>
             </table>

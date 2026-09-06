@@ -283,6 +283,15 @@ function runMigrations(): void {
     if ((r.changes as number) > 0) logger.info(`Reconciled ${r.changes} interrupted scanner task(s) to paused`);
   } catch (err) { logger.warn('Reconcile scanner tasks failed:', err); }
 
+  // 迁移：scanner_results 新增 checker_id 列（哪号查的；-1=Web通道，-2=老数据未知；熔断按号隔离用）
+  try {
+    const srCols2 = db.prepare('PRAGMA table_info(scanner_results)').all() as Array<{ name: string }>;
+    if (!srCols2.some((c) => c.name === 'checker_id')) {
+      db.exec('ALTER TABLE scanner_results ADD COLUMN checker_id INTEGER NOT NULL DEFAULT -2');
+      logger.info('Migrated scanner_results table: added checker_id column');
+    }
+  } catch (err) { logger.warn('Migrate scanner_results checker_id failed:', err); }
+
   // 迁移：scanner_tasks 新增 channel 列（pool=Checker池，web:<accountId>=管理器已登录账号直查）
   try {
     const chCols = db.prepare('PRAGMA table_info(scanner_tasks)').all() as Array<{ name: string }>;
