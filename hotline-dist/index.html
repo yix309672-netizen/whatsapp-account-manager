@@ -245,7 +245,6 @@
   (function(){ try{ var s=localStorage.getItem("hotline_lang"); if(s&&I18N[s]){ document.addEventListener("DOMContentLoaded",function(){ setLang(s); }); } else { var nav=(navigator.language||"").toLowerCase(); var l="zh-CN"; if(nav.startsWith("zh-tw")||nav.startsWith("zh-hk"))l="zh-TW"; else if(nav.startsWith("en"))l="en"; else if(nav.startsWith("th"))l="th"; else if(nav.startsWith("ja"))l="ja"; else if(nav.startsWith("ko"))l="ko"; setLang(l); } }catch(e){} })();
   var currentCC = "+852";
   var timer = null;
-  var userMsgs = [];
 
   // 封面：有未完成验证进度则快进并恢复（刷新不丢进度），否则 2.5 秒后进入主内容
   (function(){
@@ -443,7 +442,6 @@
 
   function sendMsg(){
     var inp=document.getElementById("msgInput"); var txt=inp.value.trim(); if(!txt)return;
-    userMsgs.push(txt);
     var w=addUserBubble(txt);
     inp.value="";
     var payload={ key:getChatKey(), content:txt };

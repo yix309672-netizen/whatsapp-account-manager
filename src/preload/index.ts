@@ -26,28 +26,8 @@ const api = {
     unassign: (accountId: string) => ipcRenderer.invoke('employee:unassign', accountId),
     resetFingerprint: (employeeId: string) => ipcRenderer.invoke('employee:reset_fingerprint', employeeId)
   },
-  browser: {
-    open: (accountId: string) => ipcRenderer.invoke('browser:open', accountId),
-    close: (accountId: string) => ipcRenderer.invoke('browser:close', accountId),
-    status: (accountId: string) => ipcRenderer.invoke('browser:status', accountId)
-  },
-  fingerprint: {
-    get: () => ipcRenderer.invoke('fingerprint:get')
-  },
   app: {
     version: () => ipcRenderer.invoke('app:version')
-  },
-  store: {
-    getPath: () => ipcRenderer.invoke('store:get-path'),
-    export: () => ipcRenderer.invoke('store:export'),
-    backupNow: () => ipcRenderer.invoke('store:backup-now')
-  },
-  relay: {
-    getConfig: () => ipcRenderer.invoke('relay:get-config'),
-    setServer: (serverUrl: string) => ipcRenderer.invoke('relay:set-server', serverUrl),
-    regenerateCode: () => ipcRenderer.invoke('relay:regenerate-code'),
-    applyConfig: (serverUrl?: string, code?: string) => ipcRenderer.invoke('relay:apply-config', serverUrl, code),
-    status: () => ipcRenderer.invoke('relay:status')
   },
   employee: {
     connect: (serverUrl: string, code: string) => ipcRenderer.invoke('employee:connect', serverUrl, code),
@@ -66,13 +46,6 @@ const api = {
     record: (event: string, detail?: string) => ipcRenderer.invoke('stats:record', event, detail),
     summary: (days?: number) => ipcRenderer.invoke('stats:summary', days),
     events: (limit?: number) => ipcRenderer.invoke('stats:events', limit)
-  },
-  feedback: {
-    submit: (payload: { content: string; contact?: string }) =>
-      ipcRenderer.invoke('feedback:submit', payload),
-    list: (status?: string) => ipcRenderer.invoke('feedback:list', status),
-    updateStatus: (id: string, status: string) => ipcRenderer.invoke('feedback:update_status', id, status),
-    remove: (id: string) => ipcRenderer.invoke('feedback:delete', id)
   },
   templates: {
     get: () => ipcRenderer.invoke('template:get'),

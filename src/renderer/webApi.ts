@@ -201,28 +201,8 @@ export const webApi = {
     unassign: (accountId: string) => wsInvoke("employee:unassign", { accountId }),
     resetFingerprint: (employeeId: string) => wsInvoke("employee:reset_fingerprint", { employeeId }),
   },
-  browser: {
-    open: (accountId: string) => wsInvoke("browser:open", { accountId }),
-    close: (accountId: string) => wsInvoke("browser:close", { accountId }),
-    status: (accountId: string) => wsInvoke("browser:status", { accountId }),
-  },
-  fingerprint: {
-    get: () => wsInvoke("fingerprint:get", {}),
-  },
   app: {
     version: () => wsInvoke("app:version", {}),
-  },
-  store: {
-    getPath: () => wsInvoke("store:get-path", {}),
-    export: () => wsInvoke("store:export", {}),
-    backupNow: () => wsInvoke("store:backup-now", {}),
-  },
-  relay: {
-    getConfig: () => wsInvoke("relay:get-config", {}),
-    setServer: (serverUrl: string) => wsInvoke("relay:set-server", { serverUrl }),
-    regenerateCode: () => wsInvoke("relay:regenerate-code", {}),
-    applyConfig: (serverUrl?: string, code?: string) => wsInvoke("relay:apply-config", { serverUrl, code }),
-    status: () => wsInvoke("relay:status", {}),
   },
   employee: {
     connect: (serverUrl: string, code: string) => wsInvoke("employee:connect", { serverUrl, code }),
@@ -238,12 +218,6 @@ export const webApi = {
     record: (event: string, detail?: string) => wsInvoke("stats:record", { event, detail }),
     summary: (days?: number) => wsInvoke("stats:summary", { days }),
     events: (limit?: number) => wsInvoke("stats:events", { limit }),
-  },
-  feedback: {
-    submit: (payload: { content: string; contact?: string }) => wsInvoke("feedback:submit", payload as unknown as Record<string, unknown>),
-    list: (status?: string) => wsInvoke("feedback:list", { status }),
-    updateStatus: (id: string, status: string) => wsInvoke("feedback:update_status", { id, status }),
-    remove: (id: string) => wsInvoke("feedback:delete", { id }),
   },
   templates: {
     get: () => wsInvoke("template:get", {}),
