@@ -9,7 +9,8 @@ export interface RelaySettings {
 }
 
 const DEFAULTS: RelaySettings = {
-  serverUrl: 'wss://waam-relay.yix309672.workers.dev/ws',
+  // 默认不连任何中转（空=禁用）。中转 Worker 已下线，留旧地址会导致无限空拨。
+  serverUrl: '',
   code: ''
 };
 
