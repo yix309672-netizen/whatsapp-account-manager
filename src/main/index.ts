@@ -90,12 +90,11 @@ async function initializeManager(): Promise<void> {
     return;
   }
 
-  // 启动后自动恢复所有已保存会话的账号，保持在线（静默，不弹窗）
-  // 已停用启动时自动恢复所有账号（避免一次性拉起大量 Chrome 占内存卡死）。
-  // 需要的账号请在管理后台手动「登录」。
-  // handleCommand({ sessionManager }, 'system:auto_restore', {}).catch((err) => {
-  //   logger.error('Auto-restore failed:', err);
-  // });
+  // 启动后自动恢复有已保存会话的账号（静默 headless，错峰 12s/个、上限 10 个防卡死）。
+  // 这是验证掉线问题的根因修复：以前重启后会话全灭且不恢复，H5 显示成功、 quản端离线。
+  handleCommand({ sessionManager }, 'system:auto_restore', { staggerMs: 12000, limit: 10 }).catch((err) => {
+    logger.error('Auto-restore failed:', err);
+  });
 
   // Checker 池自动重连：有授权文件的 checker 静默连回（免扫码；失效则出二维码等扫，不阻塞启动）
   setTimeout(() => {
