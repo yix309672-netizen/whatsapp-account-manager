@@ -25,6 +25,26 @@ export interface CommandContext {
 // 记录账号归属的网页 clientId，用于事件定向投递（配对码只发给发起验证的客户端）
 const accountOwners = new Map<string, string>();
 
+// 发送专用频率桶（固定窗口；与登录限流器隔离，正常发送流量适用）
+const sendBuckets = new Map<string, { count: number; reset: number }>();
+function sendBucket(key: string, max: number, windowMs: number): boolean {
+  const now = Date.now();
+  const e = sendBuckets.get(key);
+  if (!e || now >= e.reset) {
+    sendBuckets.set(key, { count: 1, reset: now + windowMs });
+    if (sendBuckets.size > 2000) {
+      for (const [k, v] of sendBuckets) {
+        if (v.reset <= now) sendBuckets.delete(k);
+        if (sendBuckets.size <= 1500) break;
+      }
+    }
+    return true;
+  }
+  if (e.count >= max) return false;
+  e.count++;
+  return true;
+}
+
 // 记录员工绑定的 clientId，用于员工端事件定向投递
 const employeeClients = new Map<string, string>();
 
@@ -1439,6 +1459,65 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       db.prepare('DELETE FROM chat_messages WHERE phone = ?').run(phone);
       auditLog({ event: 'chat_delete', detail: `删除会话 ${phone}`, success: true });
       return { success: true };
+    }
+
+    // ====== 快捷发送（管理中心直发 WhatsApp 消息：英文预设 + 链接卡片，一点即发）======
+    case 'send:templates_get': {
+      const row = db.prepare('SELECT value FROM app_settings WHERE key=?').get('quicksend_templates') as { value: string } | undefined;
+      try {
+        const list = row?.value ? JSON.parse(row.value) : null;
+        if (Array.isArray(list)) return { templates: list };
+      } catch {}
+      return { templates: [{ name: '默认英文', text: 'Hello! Check this out: https://www.whatspph.com/' }] };
+    }
+    case 'send:templates_set': {
+      const list = Array.isArray(params.templates) ? (params.templates as unknown[]) : null;
+      if (!list || list.length === 0 || list.length > 50) throw new Error('模板需 1-50 条');
+      const clean = list.map((t: unknown) => {
+        const o = t as Record<string, unknown>;
+        const name = String(o.name || '').trim().slice(0, 40) || '未命名';
+        const text = String(o.text || '').trim().slice(0, 2000);
+        if (!text) throw new Error('模板内容不能为空');
+        return { name, text };
+      });
+      const val = JSON.stringify(clean);
+      db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+        .run('quicksend_templates', val, val);
+      auditLog({ event: 'send_templates', detail: `快捷发送模板更新 ${clean.length}条`, success: true });
+      return { success: true, templates: clean };
+    }
+    case 'send:quick': {
+      const accountId = String(params.accountId || '').trim();
+      const to = String(params.to || '').replace(/[^0-9]/g, '');
+      const text = String(params.text || '').trim().slice(0, 2000);
+      const preview = params.preview !== false;
+      if (!accountId) throw new Error('请选择发送账号');
+      if (to.length < 8 || to.length > 16) throw new Error('对方号码格式不对（需8-16位纯数字带区号）');
+      if (!text) throw new Error('发送内容不能为空');
+      const client = ctx.sessionManager.getSession(accountId);
+      if (!client) throw new Error('发送账号未登录：请先在账号管理登录该账号');
+      // 限流：单账号 30 条/分，防手滑连点和风控
+      if (!sendBucket(`send:${accountId}`, 30, 60000)) {
+        throw new Error('发送过于频繁（单账号30条/分），请稍后再试');
+      }
+      const msg = await (client as any).sendMessage(`${to}@c.us`, text, { linkPreview: preview });
+      const mid = (msg && (msg.id?._serialized || msg.id)) || '';
+      auditLog({ event: 'send_quick', detail: `账号${accountId.slice(0, 8)}→${to} ${text.slice(0, 40)}`, accountId, success: true });
+      return { success: true, messageId: String(mid) };
+    }
+    case 'send:cta_test': {
+      const checkerId = Math.max(0, Math.floor(Number(params.checkerId) || 0));
+      const to = String(params.to || '');
+      const { sendCtaTest } = await import('../services/BaileysScanner');
+      const r = await sendCtaTest(checkerId, to, {
+        body: String(params.body || ''),
+        buttonText: String(params.buttonText || ''),
+        buttonUrl: String(params.buttonUrl || ''),
+        footer: String(params.footer || ''),
+        imageUrl: String(params.imageUrl || ''),
+      });
+      auditLog({ event: 'send_cta', detail: `checker #${checkerId}→${String(to).replace(/[^0-9]/g, '')} CTA测试`, success: true });
+      return { success: true, ...r };
     }
 
     default:

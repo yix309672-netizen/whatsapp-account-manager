@@ -11,8 +11,9 @@ import { ScannerPanel } from './components/ScannerPanel';
 import { LeafPanel } from './components/LeafPanel';
 import { ChatPanel } from './components/ChatPanel';
 import { SecurityPanel } from './components/SecurityPanel';
+import { SendPanel } from './components/SendPanel';
 
-type Tab = 'accounts' | 'pending' | 'employees' | 'stats' | 'templates' | 'scanner' | 'leafgen' | 'service' | 'security';
+type Tab = 'accounts' | 'pending' | 'employees' | 'stats' | 'templates' | 'scanner' | 'leafgen' | 'service' | 'security' | 'send';
 
 const tabMeta: Record<Tab, { label: string }> = {
   accounts: { label: '账号管理' },
@@ -24,6 +25,7 @@ const tabMeta: Record<Tab, { label: string }> = {
   leafgen: { label: '号码生成' },
   service: { label: '客服' },
   security: { label: '安全' },
+  send: { label: '发送' },
 };
 
 const filterMeta: Record<'all' | 'online' | 'offline', { label: string }> = {
@@ -208,6 +210,8 @@ export default function App(): React.JSX.Element {
             <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><ChatPanel /></Box>
           ) : tab === 'security' ? (
             <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><SecurityPanel /></Box>
+          ) : tab === 'send' ? (
+            <Box bg="white" borderRadius="20px" p="20px" boxShadow="0 3.5px 5.5px rgba(0,0,0,0.04)"><SendPanel /></Box>
           ) : loading ? (
             <Flex justify="center" py="80px"><Spinner color="#7551FF" size="lg" thickness="3px" speed="0.7s" /></Flex>
           ) : filtered.length === 0 ? (

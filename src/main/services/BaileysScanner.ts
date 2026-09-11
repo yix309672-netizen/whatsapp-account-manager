@@ -831,6 +831,64 @@ export async function runWebTask(taskId: string, getClient: () => any): Promise<
   }
 }
 
+// CTA 跳转按钮测试（Baileys checker 发 interactiveMessage，原生 cta_url 按钮）。
+// 注意：协议能发出≠对方一定渲染（Meta 对非官方发的交互消息可能降级），必须真机看效果。
+// 用法：checker 在线 + 对方是能正常收消息的号；先发图片+正文，再发按钮体（官方模板是合一气泡，这里拆两条，内容一致）。
+export interface CtaTestOpts {
+  body: string;
+  buttonText: string;
+  buttonUrl: string;
+  footer?: string;
+  imageUrl?: string;
+}
+export async function sendCtaTest(checkerId: number, to: string, opts: CtaTestOpts): Promise<{ messageIds: string[] }> {
+  const c = getChecker(checkerId);
+  if (!c.sock || c.connectionState !== 'open') throw new Error(`checker #${checkerId} 未在线，请先扫码登录`);
+  const digits = String(to || '').replace(/[^0-9]/g, '');
+  if (digits.length < 8 || digits.length > 16) throw new Error('对方号码格式不对（需8-16位纯数字带区号）');
+  const body = String(opts.body || '').trim().slice(0, 2000);
+  const buttonText = String(opts.buttonText || '').trim().slice(0, 30);
+  const buttonUrl = String(opts.buttonUrl || '').trim().slice(0, 500);
+  if (!body) throw new Error('正文不能为空');
+  if (!buttonText) throw new Error('按钮文字不能为空');
+  if (!/^https?:\/\/.+\..+/.test(buttonUrl)) throw new Error('跳转地址需 http(s) 开头的完整 URL');
+  const jid = `${digits}@s.whatsapp.net`;
+  const baileys: any = await import('@whiskeysockets/baileys');
+  const { proto, generateWAMessageFromContent } = baileys;
+  if (!proto?.Message?.InteractiveMessage || !generateWAMessageFromContent) {
+    throw new Error('当前 Baileys 版本不支持 interactive 消息构造');
+  }
+  const sent: string[] = [];
+  // 1) 图片 + 加粗正文（*bold* 为 WA 原生语法）
+  const imageUrl = String(opts.imageUrl || '').trim();
+  if (imageUrl) {
+    const im = await c.sock.sendMessage(jid, { image: { url: imageUrl }, caption: body });
+    if (im?.key?.id) sent.push(String(im.key.id));
+    await delay(1500);
+  }
+  // 2) CTA 跳转按钮体
+  const footer = String(opts.footer || '').trim().slice(0, 200);
+  const content: Record<string, unknown> = {
+    interactiveMessage: proto.Message.InteractiveMessage.fromObject({
+      body: { text: body },
+      ...(footer ? { footer: { text: footer } } : {}),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
+        buttons: [
+          {
+            name: 'cta_url',
+            buttonParamsJson: JSON.stringify({ display_text: buttonText, url: buttonUrl, merchant_url: buttonUrl }),
+          },
+        ],
+      }),
+    }),
+  };
+  const waMsg = await generateWAMessageFromContent(jid, content as never, { userJid: c.sock.user?.id });
+  await c.sock.relayMessage(jid, waMsg.message!, { messageId: waMsg.key.id! });
+  if (waMsg.key?.id) sent.push(String(waMsg.key.id));
+  logger.info(`[BaileysScanner] checker #${checkerId} CTA test sent to ${digits}: ${sent.join(',')}`);
+  return { messageIds: sent };
+}
+
 export function isScanRunning(): boolean { return currentTaskId !== null; }
 export function pauseScan(): void { paused = true; broadcast('scanner:task', { id: currentTaskId, status: 'paused' }); }
 export function resumeScan(): void { paused = false; broadcast('scanner:task', { id: currentTaskId, status: 'running' }); }
