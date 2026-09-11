@@ -1032,7 +1032,12 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'template:publish': {
       const template = String(params.template || '');
-      const target = template === 'hotline' ? 'hotline' : 'classic';
+      // www 只托管验证 H5：禁止把 classic 管理后台包发到 waam-web（曾覆盖 H5 导致全站变登录页）。
+      // 要发 classic 请先在 Cloudflare 建独立 Pages 项目并改此处的 projectName。
+      if (template !== 'hotline') {
+        throw new Error('已禁用：classic 包禁止发布到 waam-web（会覆盖验证 H5）。如需发布请选择 hotline 模板。');
+      }
+      const target = 'hotline';
       // 异步发布：wrangler deploy 经常超过 30s（前端 WS 超时），同步等必报"请求超时"。
       // 这里只做互斥检查后立即返回，后台执行；前端轮询 template:publish_status 看结果。
       if (publishState.running) {
