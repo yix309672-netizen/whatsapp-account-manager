@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { loginAdmin, fetchCaptcha, logoutAdmin } from '../webApi';
+import { loginAdmin, loginEmployee, fetchCaptcha, logoutAdmin } from '../webApi';
 import w171Bg from '../assets/w171-m.webp';
 
 export function LoginGate({ children }: { children: React.ReactNode }): React.JSX.Element {
   const [authed, setAuthed] = useState<boolean>(false);
+  const [role, setRole] = useState<'admin' | 'employee'>('admin');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [captcha, setCaptcha] = useState('');
@@ -42,7 +43,11 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
     }
     setLoading(true);
     try {
-      await loginAdmin(username.trim(), password.trim(), captchaId, captcha.trim());
+      if (role === 'employee') {
+        await loginEmployee(username.trim(), password.trim(), captchaId, captcha.trim());
+      } else {
+        await loginAdmin(username.trim(), password.trim(), captchaId, captcha.trim());
+      }
       setAuthed(true);
     } catch (err) {
       setError((err as Error).message || '登录失败');
@@ -85,6 +90,18 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
               </div>
               <h1 className="text-2xl font-bold tracking-widest text-amber-100 font-serif">江湖 · 安全阁</h1>
               <p className="text-xs text-amber-200/60 mt-2 tracking-[0.3em]">WHATSAPP SECURE CONSOLE</p>
+              <div className="flex justify-center gap-2 mt-4">
+                {(['admin', 'employee'] as const).map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => { setRole(r); setError(''); }}
+                    className={`px-4 py-1.5 rounded-lg text-xs tracking-widest transition-all ${role === r ? 'bg-amber-500 text-black font-bold' : 'bg-black/40 text-amber-200/60 border border-amber-500/25'}`}
+                  >
+                    {r === 'admin' ? '管理员' : '员工'}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="space-y-4">

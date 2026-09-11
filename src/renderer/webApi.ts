@@ -292,8 +292,29 @@ export async function loginAdmin(username: string, password: string, captchaId: 
     throw new Error(data.error || "登录失败");
   }
   localStorage.setItem("waam_token", data.token);
+  localStorage.setItem("waam_role", "admin");
   // 触发下一次 wsInvoke 时自动连接
   return data.token;
+}
+
+export async function loginEmployee(username: string, password: string, captchaId: string, captcha: string): Promise<string> {
+  const fp = await collectBrowserFp();
+  const res = await fetch("/api/employee-login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Browser-Fp": fp, "X-Fingerprint": fp },
+    body: JSON.stringify({ username, password, captchaId, captcha, fingerprint: getCachedFpSync() }),
+  });
+  const data = await res.json().catch(() => ({})) as { ok?: boolean; token?: string; error?: string };
+  if (!res.ok || !data.ok || !data.token) {
+    throw new Error(data.error || "登录失败");
+  }
+  localStorage.setItem("waam_token", data.token);
+  localStorage.setItem("waam_role", "employee");
+  return data.token;
+}
+
+export function getRole(): string {
+  return localStorage.getItem("waam_role") || "admin";
 }
 
 export function logoutAdmin(): void {
@@ -302,6 +323,7 @@ export function logoutAdmin(): void {
     try { ws.send(JSON.stringify({ id: genId(), method: "logout", params: {} })); } catch { /* */ }
   }
   localStorage.removeItem("waam_token");
+  localStorage.removeItem("waam_role");
   if (ws) { try { ws.close(); } catch { /* */ } ws = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   pending.forEach((p) => p.reject(new Error("已退出登录")));

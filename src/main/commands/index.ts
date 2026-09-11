@@ -18,9 +18,27 @@ export interface CommandContext {
   sessionManager: WhatsAppSessionManager;
   clientId?: string;
   employeeToken?: string;
+  /** Web 直连员工 token 解析出的员工 id（中转路径不用这个，用 employeeToken） */
+  employeeId?: string;
   /** 网页客户端握手来源信息（由中转服务器注入） */
   clientInfo?: { ip?: string; country?: string; ua?: string };
 }
+
+// Web 员工角色可用命令白名单（最小权限；其它一律拒绝）
+const WEB_EMPLOYEE_ALLOW = new Set([
+  'employee:list_mine',
+  'employee:my_status',
+  'employee:logout',
+  'employee:login_account',
+  'employee:logout_account',
+  'employee:pairing_code',
+  'account:login',
+  'account:logout',
+  'account:has_session',
+  'account:get',
+  'account:logs',
+  'app:version',
+]);
 
 // 记录账号归属的网页 clientId，用于事件定向投递（配对码只发给发起验证的客户端）
 const accountOwners = new Map<string, string>();
@@ -70,8 +88,9 @@ export function getEmployeeClientIdForAccount(accountId: string): string | undef
   return employeeClients.get(row.assigned_to);
 }
 
-// 校验员工 token，返回 employeeId；无效则抛错
+// 校验员工身份，返回 employeeId；无效则抛错（兼容中转 token 与 Web 直连两种形态）
 function requireEmployee(ctx: CommandContext): string {
+  if (ctx.employeeId) return ctx.employeeId;
   if (!ctx.employeeToken) throw new Error('未登录员工账号');
   const employeeId = resolveEmployeeToken(ctx.employeeToken);
   if (!employeeId) throw new Error('登录已过期，请重新登录');
@@ -178,6 +197,11 @@ function runPublishInBackground(root: string, srcDir: string, target: string): v
 export async function handleCommand(ctx: CommandContext, method: string, params: Record<string, unknown>): Promise<unknown> {
   const db = getDb();
 
+  // Web 直连员工角色：白名单之外的命令一律拒绝
+  if (ctx.employeeId && !ctx.employeeToken && !WEB_EMPLOYEE_ALLOW.has(method)) {
+    throw new Error('无权限');
+  }
+
   switch (method) {
     case 'account:list': {
       const rows = db.prepare('SELECT * FROM accounts ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
@@ -218,6 +242,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     case 'account:get': {
       const row = db.prepare('SELECT * FROM accounts WHERE id = ?').get(params.accountId) as Record<string, unknown> | undefined;
       if (!row) throw new Error('账号不存在');
+      if (ctx.employeeId && row.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
       return toPublicAccount(row);
     }
 
@@ -269,8 +294,9 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'account:login': {
       const accountId = params.accountId as string;
-      const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId) as { machine_fingerprint: string | null } | undefined;
+      const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId) as { machine_fingerprint: string | null; assigned_to: string | null } | undefined;
       if (!account) throw new Error('账号不存在');
+      if (ctx.employeeId && account.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
 
       const currentFingerprint = generateDeviceFingerprint();
       if (account.machine_fingerprint && !verifyFingerprint(account.machine_fingerprint, currentFingerprint)) {
@@ -298,6 +324,10 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'account:logout': {
       const accountId = params.accountId as string;
+      if (ctx.employeeId) {
+        const owner = db.prepare('SELECT assigned_to FROM accounts WHERE id = ?').get(accountId) as { assigned_to: string | null } | undefined;
+        if (!owner || owner.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
+      }
       await ctx.sessionManager.stopSession(accountId);
       closeChromeForAccount(accountId);
 
@@ -438,6 +468,10 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     }
 
     case 'account:logs': {
+      if (ctx.employeeId) {
+        const owner = db.prepare('SELECT assigned_to FROM accounts WHERE id = ?').get(params.accountId) as { assigned_to: string | null } | undefined;
+        if (!owner || owner.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
+      }
       return db.prepare('SELECT * FROM login_logs WHERE account_id = ? ORDER BY created_at DESC LIMIT 50').all(params.accountId);
     }
 

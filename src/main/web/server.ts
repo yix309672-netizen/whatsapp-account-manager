@@ -18,23 +18,33 @@ import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog } from '.
 // ==================== 会话 token 管理 ====================
 
 const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
-const sessions = new Map<string, number>(); // token -> 过期时间
+interface WebSession { exp: number; role: 'admin' | 'employee'; employeeId?: string }
+const sessions = new Map<string, WebSession>(); // token -> 会话（含角色）
 
-function issueToken(): string {
+function issueToken(role: 'admin' | 'employee' = 'admin', employeeId?: string): string {
   const token = randomBytes(24).toString('hex');
-  sessions.set(token, Date.now() + TOKEN_TTL_MS);
+  sessions.set(token, { exp: Date.now() + TOKEN_TTL_MS, role, employeeId });
   return token;
 }
 
-function isValidToken(token: string | null | undefined): boolean {
-  if (!token) return false;
-  const exp = sessions.get(token);
-  if (!exp) return false;
-  if (Date.now() > exp) {
+function getSession(token: string | null | undefined): WebSession | null {
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (Date.now() > s.exp) {
     sessions.delete(token);
-    return false;
+    return null;
   }
-  return true;
+  return s;
+}
+
+function isValidToken(token: string | null | undefined): boolean {
+  return getSession(token) !== null;
+}
+
+function isAdminToken(token: string | null | undefined): boolean {
+  const s = getSession(token);
+  return !!s && s.role === 'admin';
 }
 
 function revokeToken(token: string): void {
@@ -354,10 +364,62 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       return;
     }
 
-    // 改密码接口
+    // 员工登录接口（Web 直连；验证码 + 频率 + 复用 employee:login 的密码/指纹/IP 校验）
+    if (pathname === '/api/employee-login' && req.method === 'POST') {
+      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const key = `emp_login:${ip}`;
+      const rl = checkRateLimit(key);
+      if (!rl.allowed) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '登录尝试过于频繁，请稍后再试' }));
+        return;
+      }
+      const body = await readBody(req).catch(() => '');
+      let username = '', password = '', captchaId = '', captcha = '', fp = '';
+      try {
+        const d = JSON.parse(body);
+        username = String(d.username || '');
+        password = String(d.password || '');
+        captchaId = String(d.captchaId || '');
+        captcha = String(d.captcha || '');
+        fp = String(d.fingerprint || '');
+      } catch { username = ''; password = ''; }
+      if (!username || !password) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '请输入账号和密码' }));
+        return;
+      }
+      if (!checkCaptcha(captchaId, captcha)) {
+        recordFailedAttempt(key);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '验证码错误或已过期', needCaptcha: true }));
+        return;
+      }
+      try {
+        const ctx: CommandContext = { sessionManager, clientId: `web_emp_${Date.now().toString(36)}`, clientInfo: { ip } };
+        // 浏览器指纹充当机器指纹参与绑定（与桌面端同语义）
+        const result = await handleCommand(ctx, 'employee:login', { username, password, machineFingerprint: fp || undefined }) as { employee?: { id: string } };
+        const employeeId = result?.employee?.id || '';
+        if (!employeeId) throw new Error('登录失败');
+        clearRateLimit(key);
+        const token = issueToken('employee', employeeId);
+        auditLog({ event: 'employee_login', detail: `Web登录成功: ${username}`, ip, success: true });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, token }));
+      } catch (err) {
+        recordFailedAttempt(key);
+        const message = (err as Error).message || String(err);
+        auditLog({ event: 'employee_login', detail: `Web登录失败: ${username} ${message.slice(0, 60)}`, ip, success: false });
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: message }));
+      }
+      return;
+    }
+
+    // 改密码接口（仅管理员 token）
     if (pathname === '/api/change-password' && req.method === 'POST') {
       const token = url.searchParams.get('token') || (req.headers['x-admin-token'] as string) || '';
-      if (!isValidToken(token)) {
+      if (!isAdminToken(token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '未授权' }));
         return;
@@ -581,10 +643,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       return;
     }
 
-    // 导出文件下载（管理员 token 鉴权；只允许 exports 目录下的 .csv 基名，防目录穿越）
+    // 导出文件下载（仅管理员 token；只允许 exports 目录下的 .csv 基名，防目录穿越）
     if (pathname === '/api/export-download' && req.method === 'GET') {
       const token = url.searchParams.get('token') || (req.headers['x-admin-token'] as string) || '';
-      if (!isValidToken(token)) {
+      if (!isAdminToken(token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '未授权' }));
         return;
@@ -638,16 +700,19 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       socket.destroy();
       return;
     }
+    const sess = getSession(token);
     wss!.handleUpgrade(req, socket, head, (ws) => {
-      wss!.emit('connection', ws, req, token);
+      wss!.emit('connection', ws, req, token, sess);
     });
   });
 
-  wss.on('connection', (ws: WebSocket, req: IncomingMessage, token: string) => {
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage, token: string, sess?: WebSession | null) => {
     clients.add(ws);
     const ip = (req.headers['cf-connecting-ip'] as string) || req.socket.remoteAddress || '';
     const country = (req.headers['cf-ipcountry'] as string) || '';
     const ua = (req.headers['user-agent'] as string) || '';
+    const role = sess?.role || 'admin';
+    const sessEmployeeId = sess?.role === 'employee' ? sess.employeeId : undefined;
 
     ws.on('message', async (raw: Buffer | string) => {
       let msg: { id?: string; method?: string; params?: Record<string, unknown> };
@@ -679,7 +744,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       const ctx: CommandContext = {
         sessionManager,
         clientId: `web_${token.slice(0, 8)}`,
-        clientInfo: { ip, country, ua }
+        clientInfo: { ip, country, ua },
+        ...(role === 'employee' && sessEmployeeId ? { employeeId: sessEmployeeId } : {})
       };
 
       try {
