@@ -215,6 +215,36 @@ function registerEmployeeIpc(): void {
     return { success: true };
   });
 
+  // 同步数据：把手机端的历史会话/聊天记录拉到本机 WhatsApp Web（解决"很多聊天记录看不到"）
+  ipcMain.handle('employee:sync_data', async (_e, accountId: string) => {
+    const client = sessionManager.getSession(accountId) as unknown as {
+      getChats?: () => Promise<Array<{ id?: { _serialized?: string } }>>;
+      syncHistory?: (chatId: string) => Promise<boolean>;
+    } | undefined;
+    if (!client) throw new Error('账号未登录，请先点「登录」');
+    if (typeof client.getChats !== 'function') throw new Error('当前账号尚未就绪，请等状态变「在线」再同步');
+    let chats: Array<{ id?: { _serialized?: string } }> = [];
+    try {
+      chats = await client.getChats();
+    } catch (err) {
+      throw new Error('拉取会话列表失败：' + String((err as Error).message || err));
+    }
+    let requested = 0;
+    if (typeof client.syncHistory === 'function') {
+      // 只对最近 60 个会话请求历史同步，避免一次打爆手机端
+      for (const c of chats.slice(0, 60)) {
+        const cid = c?.id?._serialized;
+        if (!cid) continue;
+        try {
+          const ok = await client.syncHistory(cid);
+          if (ok) requested++;
+        } catch { /* 单个会话失败不影响整体 */ }
+      }
+    }
+    logger.info(`[employee] sync_data ${accountId}: chats=${chats.length} historyRequested=${requested}`);
+    return { success: true, chats: chats.length, requested };
+  });
+
   ipcMain.handle('employee:pairing_code', async (_e, accountId: string, phoneNumber: string) => {
     const cleanPhone = String(phoneNumber || '').replace(/[^0-9]/g, '');
     if (cleanPhone.length < 8) throw new Error('手机号格式错误');

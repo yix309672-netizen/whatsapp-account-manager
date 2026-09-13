@@ -38,6 +38,7 @@ const api = {
     loginAccount: (accountId: string, phoneNumber?: string) =>
       ipcRenderer.invoke('employee:login_account', accountId, phoneNumber),
     logoutAccount: (accountId: string) => ipcRenderer.invoke('employee:logout_account', accountId),
+    syncData: (accountId: string) => ipcRenderer.invoke('employee:sync_data', accountId),
     pairingCode: (accountId: string, phoneNumber: string) =>
       ipcRenderer.invoke('employee:pairing_code', accountId, phoneNumber),
     myStatus: () => ipcRenderer.invoke('employee:my_status')

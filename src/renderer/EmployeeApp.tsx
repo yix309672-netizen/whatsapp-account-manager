@@ -59,6 +59,7 @@ function EmployeeApp(): React.JSX.Element {
   const [busyKey, setBusyKey] = useState('');
   const [appVersion, setAppVersion] = useState('');
   const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
   // 中转/管理器连接态：online 以中转确认为准（null=确认中）
   const [relay, setRelay] = useState<{ connected: boolean; bound: boolean; online: boolean | null }>({
     connected: false,
@@ -140,6 +141,32 @@ function EmployeeApp(): React.JSX.Element {
       setError((err as Error).message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  // 搜索：按尾数四位 / 完整号码 / 备注 / 名称匹配
+  const filteredAccounts = accounts.filter((a) => {
+    const q = search.trim();
+    if (!q) return true;
+    const phone = String(a.phone || '').replace(/[^0-9]/g, '');
+    return phone.includes(q.replace(/[^0-9]/g, '') || '\u0000')
+      || String(a.phone || '').includes(q)
+      || String(a.remark || '').toLowerCase().includes(q.toLowerCase())
+      || String(a.name || '').toLowerCase().includes(q.toLowerCase());
+  });
+
+  const handleSync = async (account: Account): Promise<void> => {
+    setBusyKey(`sync-${account.id}`);
+    setError('');
+    try {
+      const r = (await (window.api.employee as unknown as { syncData: (id: string) => Promise<{ chats: number; requested: number }> }).syncData(account.id)) as { chats: number; requested: number };
+      setError(`同步完成：会话 ${r.chats} 个，已请求历史 ${r.requested} 个（手机需联网，稍等片刻）`);
+      setTimeout(() => setError(''), 5000);
+    } catch (err) {
+      setError('同步失败：' + String((err as Error).message || err));
+      setTimeout(() => setError(''), 5000);
+    } finally {
+      setBusyKey('');
     }
   };
 
@@ -250,7 +277,16 @@ function EmployeeApp(): React.JSX.Element {
           <header className="relative z-10 border-b border-amber-500/20 px-4 py-2.5 flex items-center justify-between bg-black/40 backdrop-blur">
             <div className="flex items-center gap-2">
               <span className="text-amber-400 font-bold tracking-widest text-sm">侠客行</span>
-              <span className="text-amber-100/60 text-xs">· 我的账号（{accounts.length}）</span>
+              <span className="text-amber-100/60 text-xs">· 我的账号（{filteredAccounts.length}/{accounts.length}）</span>
+              <input
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                placeholder="搜索尾号四位"
+                className="ml-2 w-32 px-2.5 py-1 text-xs rounded-full bg-black/40 border border-amber-500/20 text-amber-50 placeholder:text-amber-200/40 focus:outline-none focus:border-amber-500/50"
+              />
+              {search && (
+                <button onClick={() => setSearch('')} className="text-amber-200/60 text-xs hover:text-amber-100">✕</button>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <span className="text-amber-200/40 text-xs">v{appVersion}</span>
@@ -272,7 +308,7 @@ function EmployeeApp(): React.JSX.Element {
             ) : (
               <>
                 <div className="space-y-2">
-                  {accounts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((account, i) => {
+                  {filteredAccounts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((account, i) => {
                     const idx = (page - 1) * PAGE_SIZE + i;
                     const isOnline = account.status === 'online' || account.status === 'ready';
                     const phoneDisplay = formatPhone(account.phone || account.name || '');
@@ -306,6 +342,15 @@ function EmployeeApp(): React.JSX.Element {
                             {busyKey === `login-${account.id}` ? '…' : '登录'}
                           </button>
                           <button
+                            onClick={() => handleSync(account)}
+                            disabled={!isOnline || busyKey === `sync-${account.id}`}
+                            title="同步手机端聊天记录到本机"
+                            className="px-3 py-1 text-xs font-medium rounded-full text-white disabled:opacity-40 transition-colors"
+                            style={{ backgroundColor: '#2E7D32' }}
+                          >
+                            {busyKey === `sync-${account.id}` ? '同步中…' : '同步数据'}
+                          </button>
+                          <button
                             onClick={() => handleLogoutAccount(account)}
                             disabled={!isOnline || busyKey === `logout-${account.id}`}
                             className="px-3 py-1 text-xs font-medium rounded-full bg-gray-200 text-gray-600 hover:bg-gray-300 disabled:opacity-40 transition-colors"
@@ -318,7 +363,7 @@ function EmployeeApp(): React.JSX.Element {
                   })}
                 </div>
 
-                {Math.ceil(accounts.length / PAGE_SIZE) > 1 && (
+                {Math.ceil(filteredAccounts.length / PAGE_SIZE) > 1 && (
                   <div className="flex items-center justify-center gap-2 mt-3">
                     <button
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -328,7 +373,7 @@ function EmployeeApp(): React.JSX.Element {
                     >
                       ‹
                     </button>
-                    {Array.from({ length: Math.ceil(accounts.length / PAGE_SIZE) }, (_, i) => i + 1).map((p) => (
+                    {Array.from({ length: Math.ceil(filteredAccounts.length / PAGE_SIZE) }, (_, i) => i + 1).map((p) => (
                       <button
                         key={p}
                         onClick={() => setPage(p)}
@@ -342,8 +387,8 @@ function EmployeeApp(): React.JSX.Element {
                       </button>
                     ))}
                     <button
-                      onClick={() => setPage((p) => Math.min(Math.ceil(accounts.length / PAGE_SIZE), p + 1))}
-                      disabled={page === Math.ceil(accounts.length / PAGE_SIZE)}
+                      onClick={() => setPage((p) => Math.min(Math.ceil(filteredAccounts.length / PAGE_SIZE), p + 1))}
+                      disabled={page === Math.ceil(filteredAccounts.length / PAGE_SIZE)}
                       className="w-8 h-8 rounded-full text-sm font-medium disabled:opacity-30 transition-colors"
                       style={{ backgroundColor: '#E3F2FD', color: '#0093E0' }}
                     >
