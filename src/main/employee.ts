@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import { join } from 'path';
-import { EmployeeRelayClient } from './services/EmployeeRelayClient';
+import { EmployeeWebClient } from './services/EmployeeWebClient';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
 import { launchChromeForAccount, closeChromeForAccount, isChromeRunning, onChromeExit, cleanupStaleChrome } from './services/ChromeLauncher';
 import { generateStableMachineFingerprint } from './services/fingerprint';
@@ -23,10 +23,12 @@ if (!gotLock) {
 
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
-let relay: EmployeeRelayClient | null = null;
-// 中转 worker 确认的管理器在线态（初始未知，走事件更新）
+let relay: EmployeeWebClient | null = null;
+// 直连管理器：连上=管理器在线；连不上=离线（无法登录）
 let managerOnline: boolean | null = null;
 const sessionManager = new WhatsAppSessionManager();
+// 员工端默认管理器地址（可被设置覆盖）
+const DEFAULT_MANAGER_URL = 'wss://guanli.whatspph.com/ws';
 
 // 员工端自己的持久 clientId
 function getClientId(): string {
@@ -45,35 +47,29 @@ function getClientId(): string {
   }
 }
 
-function startRelay(serverUrl: string, code: string): void {
+function pushStatus(): void {
+  managerOnline = !!relay?.isConnected;
+  win?.webContents.send('employee:relay_status', {
+    connected: !!relay?.isConnected,
+    bound: !!relay?.isBound,
+    online: managerOnline
+  });
+}
+
+function startRelay(serverUrl: string): void {
   if (relay) {
     relay.stop();
     relay = null;
   }
-  relay = new EmployeeRelayClient(serverUrl.trim(), code.trim().toUpperCase(), getClientId());
-  relay.on('bound', (info) => {
-    if (typeof (info as { online?: unknown }).online === 'boolean') {
-      managerOnline = !!(info as { online?: boolean }).online;
-    }
-    win?.webContents.send('employee:relay_status', {
-      connected: !!relay?.isConnected,
-      bound: relay?.isBound,
-      online: managerOnline
-    });
-  });
-  relay.on('manager_status', (info) => {
-    managerOnline = !!(info as { online?: boolean }).online;
-    win?.webContents.send('employee:relay_status', {
-      connected: !!relay?.isConnected,
-      bound: relay?.isBound,
-      online: managerOnline
-    });
-  });
+  const url = (serverUrl || '').trim() || DEFAULT_MANAGER_URL;
+  relay = new EmployeeWebClient(url, getClientId(), machineFingerprint);
+  relay.on('status', () => pushStatus());
   relay.on('event', (ev) => {
     const d = ev as { channel: string; data: unknown };
     win?.webContents.send(d.channel, d.data);
   });
   relay.start();
+  setTimeout(pushStatus, 1500);
 }
 
 function createWindow(): void {
@@ -127,14 +123,11 @@ function createTray(): void {
 function registerEmployeeIpc(): void {
   ipcMain.handle('app:version', () => app.getVersion());
 
-  ipcMain.handle('employee:connect', (_e, serverUrl?: string, code?: string) => {
-    const url = (serverUrl as string) || '';
-    const c = (code as string) || '';
-    if (!url || !c) throw new Error('请填写服务器地址和接入码');
-    // 保存到 relay-config.json，与中央端一致
-    saveRelaySettings({ serverUrl: url, code: c });
-    startRelay(url, c);
-    return { success: true };
+  ipcMain.handle('employee:connect', (_e, serverUrl?: string) => {
+    const url = ((serverUrl as string) || '').trim() || DEFAULT_MANAGER_URL;
+    saveRelaySettings({ serverUrl: url, code: '' });
+    startRelay(url);
+    return { success: true, serverUrl: url };
   });
 
   ipcMain.handle('employee:get_config', () => {
@@ -142,22 +135,22 @@ function registerEmployeeIpc(): void {
   });
 
   ipcMain.handle('employee:status', () => {
+    // 直连管理器：连上=在线，连不上=离线（离线时无法登录）
     return {
       connected: !!relay?.isConnected,
       bound: !!relay?.isBound,
-      // online 以中转 worker 确认为准；null=未知（等 employee:relay_status 事件）
-      online: managerOnline
+      online: relay ? !!relay.isConnected : null
     };
   });
 
   ipcMain.handle('employee:login', async (_e, username: string, password: string) => {
-    if (!relay) throw new Error('未连接服务器');
-    const result = (await relay.cmd<{ success: boolean; token?: string; employee?: unknown }>('employee:login', {
-      username,
-      password,
-      machineFingerprint
-    })) as { success: boolean; token?: string; employee?: unknown };
-    if (result.token) relay.setToken(result.token);
+    if (!relay) throw new Error('管理器离线：请确认管理器已启动并运行');
+    // 直连管理器登录：管理器不可达时 login 内会抛"管理器离线"
+    const result = (await relay.login(username, password, machineFingerprint)) as {
+      success: boolean;
+      employee: unknown;
+    };
+    pushStatus();
     return result;
   });
 
@@ -264,12 +257,10 @@ async function initializeEmployee(): Promise<void> {
   createWindow();
   createTray();
 
-  // 启动时尝试用已保存的配置连接
+  // 启动时连管理器（用已保存地址，没存过就用默认域名）
   try {
     const cfg = loadRelaySettings();
-    if (cfg.serverUrl && cfg.code) {
-      startRelay(cfg.serverUrl, cfg.code);
-    }
+    startRelay(cfg.serverUrl || DEFAULT_MANAGER_URL);
   } catch (err) {
     logger.warn('Employee auto-connect failed:', err);
   }

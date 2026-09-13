@@ -690,7 +690,9 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     const token = url.searchParams.get('token') || '';
     const fp = url.searchParams.get('fp') || url.searchParams.get('fingerprint') || '';
     const ua = (req.headers['user-agent'] as string) || '';
-    if (!isValidToken(token)) {
+    // 员工模式：客户端无预置 token，连上后首条命令必须是 employee:login（管理器离线则连不上→无法登录）
+    const employeeMode = url.searchParams.get('employee') === '1';
+    if (!isValidToken(token) && !employeeMode) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -711,8 +713,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     const ip = (req.headers['cf-connecting-ip'] as string) || req.socket.remoteAddress || '';
     const country = (req.headers['cf-ipcountry'] as string) || '';
     const ua = (req.headers['user-agent'] as string) || '';
-    const role = sess?.role || 'admin';
-    const sessEmployeeId = sess?.role === 'employee' ? sess.employeeId : undefined;
+    const employeeMode = new URL(req.url || '/', 'http://localhost').searchParams.get('employee') === '1';
+    // 员工模式连接：登录前为 pending，登录成功后绑定 employeeId
+    let connEmployeeId = sess?.role === 'employee' ? sess.employeeId : undefined;
+    let pendingEmployeeAuth = employeeMode && !connEmployeeId;
 
     ws.on('message', async (raw: Buffer | string) => {
       let msg: { id?: string; method?: string; params?: Record<string, unknown> };
@@ -741,15 +745,25 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         return;
       }
 
+      // 员工模式未登录：只放行 employee:login，其余一律拒绝
+      if (pendingEmployeeAuth && method !== 'employee:login') {
+        ws.send(JSON.stringify({ id, ok: false, error: '请先登录' }));
+        return;
+      }
+
       const ctx: CommandContext = {
         sessionManager,
-        clientId: `web_${token.slice(0, 8)}`,
+        clientId: `web_${(token || 'emp').slice(0, 8)}`,
         clientInfo: { ip, country, ua },
-        ...(role === 'employee' && sessEmployeeId ? { employeeId: sessEmployeeId } : {})
+        ...(connEmployeeId ? { employeeId: connEmployeeId } : {})
       };
 
       try {
         const result = await handleCommand(ctx, method, params);
+        if (pendingEmployeeAuth && method === 'employee:login') {
+          const empId = (result as { employee?: { id?: string } })?.employee?.id;
+          if (empId) { connEmployeeId = empId; pendingEmployeeAuth = false; }
+        }
         ws.send(JSON.stringify({ id, ok: true, data: result }));
       } catch (err) {
         const message = (err as Error).message || String(err);

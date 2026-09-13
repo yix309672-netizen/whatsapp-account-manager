@@ -72,10 +72,9 @@ function EmployeeApp(): React.JSX.Element {
     window.api.employee
       .getConfig()
       .then((cfg: unknown) => {
-        const c = cfg as { serverUrl?: string; code?: string };
-        const url = (c?.serverUrl || '').trim() || 'wss://waam-relay.yix309672.workers.dev/ws';
-        const code = (c?.code || '').trim() || 'RAMSG5LDRX5Z';
-        return window.api.employee.connect(url, code);
+        const c = cfg as { serverUrl?: string };
+        const url = (c?.serverUrl || '').trim() || 'wss://guanli.whatspph.com/ws';
+        return window.api.employee.connect(url);
       })
       .catch(() => {});
     window.api.employee
@@ -118,7 +117,7 @@ function EmployeeApp(): React.JSX.Element {
     relay.online === true
       ? ''
       : relay.online === false
-        ? '管理器离线：请确认管理端在线及接入码一致，连接恢复后自动解除'
+        ? '管理器离线：无法连接管理端，请确认管理器已启动并运行'
         : '正在确认管理器状态…';
   const canLogin = relay.online === true && !busy && !!username && !!password;
 

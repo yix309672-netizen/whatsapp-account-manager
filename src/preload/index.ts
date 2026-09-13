@@ -30,7 +30,7 @@ const api = {
     version: () => ipcRenderer.invoke('app:version')
   },
   employee: {
-    connect: (serverUrl: string, code: string) => ipcRenderer.invoke('employee:connect', serverUrl, code),
+    connect: (serverUrl: string, code?: string) => ipcRenderer.invoke('employee:connect', serverUrl, code),
     getConfig: () => ipcRenderer.invoke('employee:get_config'),
     status: () => ipcRenderer.invoke('employee:status'),
     login: (username: string, password: string) => ipcRenderer.invoke('employee:login', username, password),
