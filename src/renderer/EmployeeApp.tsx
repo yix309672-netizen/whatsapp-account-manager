@@ -74,7 +74,9 @@ function EmployeeApp(): React.JSX.Element {
       .getConfig()
       .then((cfg: unknown) => {
         const c = cfg as { serverUrl?: string };
-        const url = (c?.serverUrl || '').trim() || 'wss://guanli.whatspph.com/ws';
+        const saved = (c?.serverUrl || '').trim();
+        // 旧中转地址废弃，强制管理器地址
+        const url = (!saved || /waam-relay|workers\.dev/i.test(saved)) ? 'wss://guanli.whatspph.com/ws' : saved;
         return window.api.employee.connect(url);
       })
       .catch(() => {});

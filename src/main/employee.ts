@@ -61,7 +61,9 @@ function startRelay(serverUrl: string): void {
     relay.stop();
     relay = null;
   }
-  const url = (serverUrl || '').trim() || DEFAULT_MANAGER_URL;
+  // 旧的 relay worker 地址一律废弃，强制走 Web 管理器
+  const saved = (serverUrl || '').trim();
+  const url = (!saved || /waam-relay|workers\.dev/i.test(saved)) ? DEFAULT_MANAGER_URL : saved;
   relay = new EmployeeWebClient(url, getClientId(), machineFingerprint);
   relay.on('status', () => pushStatus());
   relay.on('event', (ev) => {
