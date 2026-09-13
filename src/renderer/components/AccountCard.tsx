@@ -74,6 +74,10 @@ export function AccountCard({ account, index }: AccountCardProps): React.JSX.Ele
           <Text fontSize="11px" color="#A0AEC0" noOfLines={1} title={account.remark || ''}>
             {account.remark || '— 无备注 —'}
           </Text>
+          <Text fontSize="10px" color="#A0AEC0">
+            验证：{account.created_at ? new Date(account.created_at * 1000).toLocaleString() : '—'}
+            {account.assigned_to ? ` · 已分配` : ''}
+          </Text>
         </VStack>
         <Text fontSize="9px" color="#CBD5E0" fontWeight="700" letterSpacing="1px" flexShrink={0}>
           CH:{index + 1} · {isOnline ? 'ACTIVE' : 'IDLE'}

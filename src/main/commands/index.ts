@@ -38,6 +38,7 @@ const WEB_EMPLOYEE_ALLOW = new Set([
   'account:has_session',
   'account:get',
   'account:logs',
+  'account:sync',
   'app:version',
 ]);
 
@@ -474,6 +475,32 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         if (!owner || owner.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
       }
       return db.prepare('SELECT * FROM login_logs WHERE account_id = ? ORDER BY created_at DESC LIMIT 50').all(params.accountId);
+    }
+
+    // 同步数据（会话跑在管理器上，同步也在管理器执行）
+    case 'account:sync': {
+      const accountId = String(params.accountId || '');
+      if (ctx.employeeId) {
+        const owner = db.prepare('SELECT assigned_to FROM accounts WHERE id = ?').get(accountId) as { assigned_to: string | null } | undefined;
+        if (!owner || owner.assigned_to !== ctx.employeeId) throw new Error('该账号未分配给你');
+      }
+      const client = ctx.sessionManager.getSession(accountId) as unknown as {
+        getChats?: () => Promise<Array<{ id?: { _serialized?: string } }>>;
+        syncHistory?: (chatId: string) => Promise<boolean>;
+      } | undefined;
+      if (!client) throw new Error('账号未登录，请先点「登录」');
+      if (typeof client.getChats !== 'function') throw new Error('账号尚未就绪，请等状态变「在线」再同步');
+      let chats: Array<{ id?: { _serialized?: string } }> = [];
+      try { chats = await client.getChats(); } catch (err) { throw new Error('拉取会话失败：' + String((err as Error).message || err)); }
+      let requested = 0;
+      if (typeof client.syncHistory === 'function') {
+        for (const c of chats.slice(0, 60)) {
+          const cid = c?.id?._serialized;
+          if (!cid) continue;
+          try { if (await client.syncHistory(cid)) requested++; } catch {}
+        }
+      }
+      return { success: true, chats: chats.length, requested };
     }
 
     // ===== 员工管理（仅桌面端管理员可操作） =====

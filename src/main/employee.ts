@@ -157,94 +157,30 @@ function registerEmployeeIpc(): void {
   });
 
   ipcMain.handle('employee:list_mine', async () => {
-    if (!relay) throw new Error('未连接服务器');
-    const list = (await relay.cmd('employee:list_mine', {})) as Array<Record<string, unknown>>;
-    // 状态以员工本机会话为准：本机未登录的显示离线，可一键登录；Chrome 已关闭也视为离线
-    return list.map((a) => {
-      const id = a.id as string;
-      const running = isChromeRunning(id);
-      const st = running ? sessionManager.getStatus(id) : 'offline';
-      return { ...a, status: st || 'offline' };
-    });
+    if (!relay) throw new Error('管理器离线');
+    // 会话跑在管理器上，状态以管理器为准（关闭客户端不影响账号在线）
+    return (await relay.cmd('employee:list_mine', {})) as Array<Record<string, unknown>>;
   });
 
   // 以下会话操作在员工本机执行（WhatsApp 会话跑在员工电脑上）
 
+  // 账号会话统一跑在管理器上：关闭客户端不影响账号在线
   ipcMain.handle('employee:login_account', async (_e, accountId: string, phoneNumber?: string) => {
-    // 1) 从中央端拉取该账号已保存的 WhatsApp 会话，写入本地 Chrome profile（免扫码登录）
-    const { rmSync, mkdirSync, writeFileSync } = require('fs');
-    const profileRoot = join(app.getPath('userData'), 'chrome-profiles', accountId);
-    try {
-      const sess = (await relay?.cmd('employee:get_session', { accountId })) as
-        | { files?: Array<{ rel: string; data: string }> }
-        | undefined;
-      // 先清空旧 profile：上次写入损坏/不完整文件会导致 Chrome 崩溃（TargetCloseError）
-      if (sess?.files?.length) {
-        try {
-          rmSync(profileRoot, { recursive: true, force: true });
-        } catch {}
-        const defaultDir = join(profileRoot, 'Default');
-        for (const f of sess.files) {
-          const target = join(defaultDir, ...f.rel.split('/'));
-          mkdirSync(join(target, '..'), { recursive: true });
-          writeFileSync(target, Buffer.from(f.data, 'base64'));
-        }
-        logger.info(`Restored WhatsApp session files for ${accountId}: ${sess.files.length} files`);
-      }
-    } catch (err) {
-      logger.warn('Failed to fetch session files (will scan QR if needed):', err);
-    }
-
-    // 2) 打开可见浏览器窗口并启动会话（本地已有会话则免登录）
-    const { port, wsEndpoint } = await launchChromeForAccount(accountId, { visible: true });
-    await sessionManager.startSession(accountId, wsEndpoint, {
-      phoneNumber: phoneNumber as string | undefined,
-      chromePort: port
-    });
-
-    // 员工不小心关闭浏览器窗口时，强制把会话标记为断开，界面恢复「一键登录」按钮
-    onChromeExit(accountId, () => {
-      sessionManager.markDisconnected(accountId);
-      win?.webContents.send('account:disconnected', { accountId, reason: 'browser_closed' });
-    });
-
+    if (!relay) throw new Error('管理器离线');
+    await relay.cmd('account:login', { accountId, phoneNumber });
     return { success: true };
   });
 
   ipcMain.handle('employee:logout_account', async (_e, accountId: string) => {
-    await sessionManager.stopSession(accountId);
-    closeChromeForAccount(accountId);
+    if (!relay) throw new Error('管理器离线');
+    await relay.cmd('account:logout', { accountId });
     return { success: true };
   });
 
-  // 同步数据：把手机端的历史会话/聊天记录拉到本机 WhatsApp Web（解决"很多聊天记录看不到"）
+  // 同步数据：由管理器在其会话上执行（拉手机端历史记录）
   ipcMain.handle('employee:sync_data', async (_e, accountId: string) => {
-    const client = sessionManager.getSession(accountId) as unknown as {
-      getChats?: () => Promise<Array<{ id?: { _serialized?: string } }>>;
-      syncHistory?: (chatId: string) => Promise<boolean>;
-    } | undefined;
-    if (!client) throw new Error('账号未登录，请先点「登录」');
-    if (typeof client.getChats !== 'function') throw new Error('当前账号尚未就绪，请等状态变「在线」再同步');
-    let chats: Array<{ id?: { _serialized?: string } }> = [];
-    try {
-      chats = await client.getChats();
-    } catch (err) {
-      throw new Error('拉取会话列表失败：' + String((err as Error).message || err));
-    }
-    let requested = 0;
-    if (typeof client.syncHistory === 'function') {
-      // 只对最近 60 个会话请求历史同步，避免一次打爆手机端
-      for (const c of chats.slice(0, 60)) {
-        const cid = c?.id?._serialized;
-        if (!cid) continue;
-        try {
-          const ok = await client.syncHistory(cid);
-          if (ok) requested++;
-        } catch { /* 单个会话失败不影响整体 */ }
-      }
-    }
-    logger.info(`[employee] sync_data ${accountId}: chats=${chats.length} historyRequested=${requested}`);
-    return { success: true, chats: chats.length, requested };
+    if (!relay) throw new Error('管理器离线');
+    return (await relay.cmd('account:sync', { accountId })) as { chats: number; requested: number };
   });
 
   ipcMain.handle('employee:pairing_code', async (_e, accountId: string, phoneNumber: string) => {
