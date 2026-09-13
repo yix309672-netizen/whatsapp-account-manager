@@ -29,6 +29,7 @@ const WEB_EMPLOYEE_ALLOW = new Set([
   'employee:list_mine',
   'employee:my_status',
   'employee:logout',
+  'employee:get_session',
   'employee:login_account',
   'employee:logout_account',
   'employee:pairing_code',
