@@ -60,6 +60,13 @@ function EmployeeApp(): React.JSX.Element {
   const [appVersion, setAppVersion] = useState('');
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [loginAt, setLoginAt] = useState(0);
+  const fmtDT = (sec?: number | null): string => {
+    if (!sec) return '—';
+    const d = new Date(sec < 1e12 ? sec * 1000 : sec);
+    const p = (n: number) => (n < 10 ? '0' + n : String(n));
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  };
   // 中转/管理器连接态：online 以中转确认为准（null=确认中）
   const [relay, setRelay] = useState<{ connected: boolean; bound: boolean; online: boolean | null }>({
     connected: false,
@@ -137,6 +144,7 @@ function EmployeeApp(): React.JSX.Element {
         employee: EmployeeInfo;
       };
       setEmployee(result.employee);
+      setLoginAt(Date.now());
       await loadMyAccounts();
       setStep('list');
     } catch (err) {
@@ -280,6 +288,7 @@ function EmployeeApp(): React.JSX.Element {
             <div className="flex items-center gap-2">
               <span className="text-amber-400 font-bold tracking-widest text-sm">侠客行</span>
               <span className="text-amber-100/60 text-xs">· 我的账号（{filteredAccounts.length}/{accounts.length}）</span>
+              {loginAt > 0 && <span className="text-amber-200/40 text-[10px]">登录：{fmtDT(loginAt)}</span>}
               <input
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
@@ -324,6 +333,7 @@ function EmployeeApp(): React.JSX.Element {
                         </div>
                         <div className="flex-1 min-w-0 text-xs text-gray-500 truncate" title={account.remark || ''}>
                           {account.remark || '—'}
+                          <span className="block text-[10px] text-gray-400">分配：{fmtDT((account as unknown as { assigned_at?: number }).assigned_at)}</span>
                         </div>
                         <span
                           className="shrink-0 text-xs px-2 py-0.5 rounded-full font-medium"

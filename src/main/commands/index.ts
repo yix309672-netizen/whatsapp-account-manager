@@ -657,6 +657,11 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         if (live && live !== 'initializing') {
           pub.status = live === 'ready' ? 'online' : 'offline';
         }
+        // 分配时间：取该账号最近一条 assign 日志
+        try {
+          const lg = db.prepare("SELECT created_at FROM login_logs WHERE account_id = ? AND action = 'assign' ORDER BY created_at DESC LIMIT 1").get(row.id) as { created_at: number } | undefined;
+          pub.assigned_at = lg?.created_at || null;
+        } catch { pub.assigned_at = null; }
         return pub;
       });
     }
