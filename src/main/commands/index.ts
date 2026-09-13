@@ -170,8 +170,8 @@ function runPublishInBackground(root: string, srcDir: string, target: string): v
     return;
   }
   // npx 定位：本机固定路径优先，否则走 PATH（spawn+shell 解析）
-  // 两套模板各发各的项目，互不覆盖：hotline→waam-web（www 验证 H5），classic→waam-classic
-  const projectName = target === 'hotline' ? 'waam-web' : 'waam-classic';
+  // 所有模板统一发到 www 对应项目：切换模板即切换线上页面（绿色 web-dist / 米色 hotline-dist）
+  const projectName = 'waam-web';
   const fixedNpx = 'C:\\nvm4w\\nodejs\\npx.cmd';
   const npxCmd = exists(fixedNpx) ? `"${fixedNpx}"` : 'npx';
   const child = spawn(`${npxCmd} wrangler pages deploy ${srcDir} --project-name ${projectName} --branch main`, {
