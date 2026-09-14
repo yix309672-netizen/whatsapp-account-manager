@@ -12,6 +12,8 @@ export function SendPanel(): React.JSX.Element {
   const [tplName, setTplName] = useState('');
   const [tplText, setTplText] = useState('');
   const [targets, setTargets] = useState('');
+  const [verified, setVerified] = useState<any[]>([]);
+  const [showPicker, setShowPicker] = useState(false);
   const [preview, setPreview] = useState(true);
   const [sending, setSending] = useState(false);
   const [sendLog, setSendLog] = useState<string[]>([]);
@@ -40,6 +42,11 @@ export function SendPanel(): React.JSX.Element {
       const list = (c?.checkers || []).filter((x: any) => x.connected);
       setCheckers(list);
       if (list[0] && !list.some((x: any) => x.id === ctaChecker)) setCtaChecker(list[0].id);
+    } catch {}
+    try {
+      // 已验证号码池：账号管理里所有带手机号的账号
+      const all = await (window.api as any).accounts.list();
+      setVerified(((all as any[]) || []).filter((a) => a.phone && String(a.phone).replace(/[^0-9]/g, '').length >= 8));
     } catch {}
     try {
       const t = await inv('send:templates_get', {});
@@ -151,7 +158,35 @@ export function SendPanel(): React.JSX.Element {
             </HStack>
           </Box>
           <Box flex="1" minW="240px">
-            <Text fontSize="11px" color="#4A5568" mb="4px">对方号码（每行一个，带区号）</Text>
+            <Flex justify="space-between" align="center" mb="4px">
+              <Text fontSize="11px" color="#4A5568">对方号码（每行一个，带区号）</Text>
+              <HStack spacing="6px">
+                <button onClick={() => setShowPicker((v) => !v)}
+                  style={{ padding: '3px 10px', fontSize: '11px', borderRadius: '8px', border: '1px solid #7551FF', color: '#7551FF', background: 'white', fontWeight: 700 }}>
+                  从账号管理选择（{verified.length}）
+                </button>
+                {targets && <button onClick={() => setTargets('')} style={{ padding: '3px 8px', fontSize: '11px', borderRadius: '8px', border: '1px solid #E2E8F0', background: 'white' }}>清空</button>}
+              </HStack>
+            </Flex>
+            {showPicker && (
+              <Box mb="8px" maxH="180px" overflowY="auto" bg="#F8FAFC" border="1px solid #E2E8F0" borderRadius="8px" p="8px">
+                {verified.length === 0 ? <Text fontSize="11px" color="#A0AEC0">账号管理里暂无已验证号码</Text> : verified.map((a) => {
+                  const digits = String(a.phone).replace(/[^0-9]/g, '');
+                  const checked = targets.split(/[\r\n,;\s]+/).includes(digits);
+                  return (
+                    <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', padding: '3px 0', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={checked} onChange={(e) => {
+                        const cur = targets.split(/[\r\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+                        const next = e.target.checked ? [...new Set([...cur, digits])] : cur.filter((x) => x !== digits);
+                        setTargets(next.join('\n'));
+                      }} />
+                      <span style={{ fontFamily: 'monospace' }}>+{digits}</span>
+                      <span style={{ color: '#A0AEC0' }}>{a.name || ''}</span>
+                    </label>
+                  );
+                })}
+              </Box>
+            )}
             <Textarea value={targets} onChange={(e) => setTargets(e.target.value)} rows={8} fontSize="12px" placeholder={'8613800000000\n886912345678'} />
             <button onClick={doSend} disabled={sending}
               style={{ marginTop: '8px', padding: '8px 16px', fontSize: '12px', borderRadius: '8px', background: '#7551FF', color: 'white', fontWeight: 700, opacity: sending ? 0.6 : 1 }}>
