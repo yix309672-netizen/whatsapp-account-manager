@@ -17,7 +17,7 @@ import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog } from '.
 
 // ==================== 会话 token 管理 ====================
 
-const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
+const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天（避免长时间不用被强制重新登录）
 interface WebSession { exp: number; role: 'admin' | 'employee'; employeeId?: string }
 const sessions = new Map<string, WebSession>(); // token -> 会话（含角色）
 

@@ -1,6 +1,6 @@
 import { app, ipcMain } from 'electron';
 import { join } from 'path';
-import { initDatabase } from './utils/db';
+import { initDatabase, maintenanceCleanup } from './utils/db';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
 import { cleanupStaleChrome } from './services/ChromeLauncher';
 import { RelayClient, setRelayInstance } from './services/RelayClient';
@@ -95,6 +95,10 @@ async function initializeManager(): Promise<void> {
   handleCommand({ sessionManager }, 'system:auto_restore', { staggerMs: 12000, limit: 10 }).catch((err) => {
     logger.error('Auto-restore failed:', err);
   });
+
+  // 长期运行维护：启动后清理一次，之后每 6 小时一次（导出文件/旧任务/旧缓存）
+  try { maintenanceCleanup(); } catch (e) { logger.warn('maintenance initial failed:', e); }
+  setInterval(() => { try { maintenanceCleanup(); } catch (e) { logger.warn('maintenance failed:', e); } }, 6 * 3600 * 1000);
 
   // Checker 池自动重连：有授权文件的 checker 静默连回（免扫码；失效则出二维码等扫，不阻塞启动）
   setTimeout(() => {

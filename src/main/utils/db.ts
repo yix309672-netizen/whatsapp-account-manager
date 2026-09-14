@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { app } from 'electron';
 import { join } from 'path';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, readdirSync, statSync, rmSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from './logger';
 
@@ -419,6 +419,34 @@ function runMigrations(): void {
       logger.warn('Seed admin_users failed:', e);
     }
   }
+}
+
+// 长期运行维护清理：导出文件 7 天、已结束的筛号任务 30 天、活跃度缓存 90 天。
+// 防止磁盘无限增长（导出 CSV、历史任务结果表）。幂等，可反复调用。
+export function maintenanceCleanup(): { exports: number; tasks: number; cache: number; chat: number } {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+  let tasks = 0;
+  let cache = 0;
+  let chat = 0;
+  try { tasks = db.prepare("DELETE FROM scanner_tasks WHERE created_at < ? AND status != 'running'").run(now - 30 * 86400).changes as number; } catch { /* ignore */ }
+  try { cache = db.prepare('DELETE FROM presence_cache WHERE checked_at < ?').run(now - 90 * 86400).changes as number; } catch { /* ignore */ }
+  try { chat = db.prepare('DELETE FROM chat_messages WHERE created_at < ?').run(now - 90 * 86400).changes as number; } catch { /* ignore */ }
+  let exports = 0;
+  try {
+    const dir = join(app.getPath('userData'), 'exports');
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        const fp = join(dir, f);
+        try {
+          const st = statSync(fp);
+          if (now - Math.floor(st.mtimeMs / 1000) > 7 * 86400) { rmSync(fp, { force: true }); exports++; }
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  if (tasks || cache || chat || exports) logger.info(`maintenance: tasks=${tasks} cache=${cache} chat=${chat} exports=${exports}`);
+  return { exports, tasks, cache, chat };
 }
 
 export function getDb(): Database.Database {
