@@ -19,7 +19,7 @@ const statusColor: Record<string, { bg: string; color: string; label: string }> 
 };
 
 export function AccountCard({ account, index }: AccountCardProps): React.JSX.Element {
-  const { removeAccount } = useAccountStore();
+  const { removeAccount, loadAccounts } = useAccountStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -116,6 +116,28 @@ export function AccountCard({ account, index }: AccountCardProps): React.JSX.Ele
           >
             退出
           </button>
+          {account.assigned_to && (
+            <button
+              onClick={async () => {
+                if (!window.confirm(`把「${phoneDisplay}」收回管理器？（员工将不再看到该账号）`)) return;
+                setBusy(true); setError('');
+                try {
+                  await window.api.employees.unassign(account.id);
+                  await loadAccounts();
+                } catch (e: unknown) {
+                  setError((e as Error).message || String(e));
+                } finally { setBusy(false); }
+              }}
+              disabled={busy}
+              style={{
+                flex: 1, padding: '9px 0', fontSize: '12px', fontWeight: '700', borderRadius: '12px',
+                background: '#FFFBEA', color: '#B7791F', border: '1px solid #F6E05E',
+                cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.6 : 1,
+              }}
+            >
+              收回
+            </button>
+          )}
           <button
             onClick={() => {
               if (window.confirm(`确定删除账号「${phoneDisplay}」？此操作不可恢复。`)) {
