@@ -185,7 +185,7 @@ function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string
     // SPA fallback：非文件路径回退到 index.html
     const fallback = join(staticDir, 'index.html');
     if (existsSync(fallback)) {
-      res.writeHead(200, { 'Content-Type': MIME['.html'] });
+      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache, must-revalidate' });
       res.end(readFileSync(fallback));
       return;
     }
@@ -194,7 +194,12 @@ function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string
     return;
   }
   const ext = extname(filePath).toLowerCase();
-  res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+  // 哈希命名的静态资源可长缓存；HTML 必须每次校验，否则前端更新后用户看不到新版
+  const isHtml = ext === '.html';
+  const cache = isHtml
+    ? 'no-cache, must-revalidate'
+    : (/assets[\\/]/.test(filePath) ? 'public, max-age=31536000, immutable' : 'public, max-age=3600');
+  res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cache });
   res.end(readFileSync(filePath));
 }
 
