@@ -95,8 +95,7 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${userDataDir}`,
-    // 关掉最后一个标签页时浏览器不退出：配合"连接前先关空白页"，使 wwjs newPage 后只剩 1 个标签页
-    '--keep-alive-for-test',
+
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-background-timer-throttling',
@@ -148,34 +147,13 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
     releaseLaunch();
   }
 
-  // 连接前先关掉 Chrome 自带的空白页：whatsapp-web.js 随后 newPage()，
-  // 这样最终只剩 1 个标签页（其渲染进程随标签关闭一并结束）。
-  const closed = await closeAllPageTargets(port).catch(() => 0);
-  if (closed > 0) logger.info(`Pre-closed ${closed} blank page(s) for account ${accountId} on port ${port}`);
-
+  // 注意：不可在 wwjs 连接前关闭空白页（会造成 Target.setAutoAttach: Target closed）。
+  // 空白页改由 closeBlankTabs 在连接后清扫（qr/code/authenticated/ready + 延时兜底）。
   return {
     port,
     wsEndpoint,
     userDataDir
   };
-}
-
-// 通过 CDP HTTP 接口关掉所有 type=page 的标签（不含 chrome 内部 UI target）
-async function closeAllPageTargets(port: number): Promise<number> {
-  let n = 0;
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-    if (!res.ok) return 0;
-    const list = (await res.json()) as Array<{ id: string; type?: string }>;
-    for (const t of list) {
-      if (t.type !== 'page') continue;
-      try {
-        await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`);
-        n++;
-      } catch { /* 单个失败不影响 */ }
-    }
-  } catch { /* CDP 不可用时跳过 */ }
-  return n;
 }
 
 async function waitForWebSocketEndpoint(port: number, timeoutMs: number): Promise<string> {
