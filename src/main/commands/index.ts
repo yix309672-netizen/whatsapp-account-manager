@@ -1,4 +1,4 @@
-import { getDb } from '../utils/db';
+﻿import { getDb } from '../utils/db';
 import { app, BrowserWindow } from 'electron';
 import { join } from 'path';
 import { existsSync, readdirSync, rmSync } from 'fs';
@@ -1272,7 +1272,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     case 'scanner:set_config': {
       const { setScanCfg } = await import('../services/BaileysScanner');
       const patch = (params.config || params) as Record<string, unknown>;
-      const allowed: Record<string, true> = { mode: true, minMs: true, maxMs: true, batchSize: true, batchRestMinMs: true, batchRestMaxMs: true, hourlyCap: true, maxConsecErr: true, checkAvatar: true, checkStatusMsg: true, retryRounds: true, retryCooldownMs: true, presenceGapMs: true, presenceTimeoutMs: true, presenceCacheDays: true };
+      const allowed: Record<string, true> = { mode: true, minMs: true, maxMs: true, batchSize: true, batchRestMinMs: true, batchRestMaxMs: true, hourlyCap: true, maxConsecErr: true, checkAvatar: true, checkStatusMsg: true, checkActive: true, retryRounds: true, retryCooldownMs: true, presenceGapMs: true, presenceTimeoutMs: true, presenceCacheDays: true };
       const clean: Record<string, unknown> = {};
       for (const k of Object.keys(allowed)) if (patch[k] !== undefined) clean[k] = patch[k];
       const config = setScanCfg(clean as never);
@@ -1302,7 +1302,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         const results = db.prepare('SELECT phone, status, last_seen, checker_id, error FROM presence_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
         return { task: t, results, kind: 'presence' };
       }
-      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
+      const results = db.prepare('SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, active_flag, error FROM scanner_results WHERE task_id=? ORDER BY created_at').all(params.taskId);
       return { task: t, results, kind: 'register' };
     }
     case 'scanner:start': {
@@ -1383,14 +1383,21 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       const args: unknown[] = [tid];
       if (filter === 'valid') where += ' AND exists_flag=1';
       else if (filter === 'invalid') where += ' AND exists_flag=0';
+      else if (filter === 'avatar') where += ' AND exists_flag=1 AND has_avatar=1';
+      else if (filter === 'signature') where += " AND exists_flag=1 AND status_msg IS NOT NULL AND status_msg <> ''";
+      else if (filter === 'active') where += ' AND exists_flag=1 AND active_flag=1';
+      else if (filter === 'inactive') where += ' AND exists_flag=1 AND active_flag=0';
+      else if (filter === 'avatar_no') where += ' AND exists_flag=1 AND has_avatar=0';
+      else if (filter === 'signature_no') where += " AND exists_flag=1 AND (status_msg IS NULL OR status_msg = '')";
       if (keyword) { where += ' AND (phone LIKE ? OR status_msg LIKE ? OR pushname LIKE ?)'; args.push(kwLike, kwLike, kwLike); }
       const rows = db.prepare(
-        `SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, error FROM scanner_results WHERE ${where} ORDER BY created_at`
+        `SELECT phone, exists_flag, has_avatar, avatar_url, status_msg, pushname, checker_id, active_flag, error FROM scanner_results WHERE ${where} ORDER BY created_at`
       ).all(...args) as any[];
       const esc = (s: string) => String(s || '').replace(/,/g, ' ').replace(/[\r\n]+/g, ' ');
       const fmtChecker = (v: unknown) => v === -1 ? '账号' : (v === -2 || v == null ? '' : v);
-      const header = '\uFEFF号码,是否开通,是否有头像,头像URL,个性签名,昵称,checker,错误\n';
-      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${fmtChecker(r.checker_id)},${esc(r.error)}`).join('\n');
+      const fmtActive = (v: unknown) => v === 1 ? '是' : v === 0 ? '否' : '';
+      const header = '\uFEFF号码,是否开通,是否活跃,是否有头像,头像URL,个性签名,昵称,checker,错误\n';
+      const body = rows.map((r: any) => `${r.phone},${r.exists_flag ? '是' : '否'},${fmtActive(r.active_flag)},${r.has_avatar ? '是' : '否'},${r.avatar_url || ''},${esc(r.status_msg)},${esc(r.pushname)},${fmtChecker(r.checker_id)},${esc(r.error)}`).join('\n');
       const csv = header + body;
       const { join } = await import('path');
       const { writeFileSync, existsSync, mkdirSync } = await import('fs');

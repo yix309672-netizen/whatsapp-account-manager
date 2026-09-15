@@ -33,7 +33,7 @@ export function ScannerPanel(): React.JSX.Element {
   const [cfgSaving, setCfgSaving] = useState(false);
   const [cfgMsg, setCfgMsg] = useState('');
   const [taskMsg, setTaskMsg] = useState('');
-  const [resultFilter, setResultFilter] = useState<'all' | 'valid' | 'invalid'>('all');
+  const [resultFilter, setResultFilter] = useState<'all' | 'valid' | 'invalid' | 'active' | 'inactive' | 'avatar' | 'signature' | 'avatar_no' | 'signature_no'>('all');
   const qrRef = useRef<HTMLCanvasElement>(null);
 
   const refresh = async () => {
@@ -277,6 +277,9 @@ export function ScannerPanel(): React.JSX.Element {
           <HStack spacing="4px">
             <input type="checkbox" checked={cfg.checkStatusMsg !== false} onChange={(e)=>upd({checkStatusMsg:e.target.checked})} />
             <Text fontSize="11px" color="#4A5568">读个性签名（对方关隐私则为空）</Text></HStack>
+          <HStack spacing="4px">
+            <input type="checkbox" checked={cfg.checkActive === true} onChange={(e)=>upd({checkActive:e.target.checked})} />
+            <Text fontSize="11px" color="#4A5568">检测活跃度（每号多等几秒；对方关"最后在线"则记不活跃）</Text></HStack>
           <HStack spacing="4px"><Text fontSize="11px" color="#4A5568">活跃间隔</Text>
             <Input value={Math.round((cfg.presenceGapMs ?? 3000)/1000)} onChange={(e)=>upd({presenceGapMs:Number(e.target.value)*1000})} size="xs" width="52px" type="number" />
             <Text fontSize="11px" color="#718096">秒/号</Text></HStack>
@@ -526,7 +529,7 @@ export function ScannerPanel(): React.JSX.Element {
           <Flex justify="space-between" align="center" wrap="wrap" gap="8px">
             <Text fontWeight="700" fontSize="13px">🔵 结果 · {selected.task.id.slice(0,8)} {selected.task.name}</Text>
             <HStack spacing="6px">
-              {([['all','全部'],['valid','有效'],['invalid','无效']] as const).map(([k,label])=>(
+              {([['all','全部'],['valid','已开通'],['invalid','未开通'],['active','活跃'],['inactive','不活跃'],['avatar','有头像'],['avatar_no','无头像'],['signature','有签名'],['signature_no','无签名']] as const).map(([k,label])=>(
                 <button key={k} onClick={()=>setResultFilter(k)}
                   style={{padding:'4px 10px', fontSize:'11px', borderRadius:'6px',
                     background: resultFilter===k ? '#7551FF' : 'white', color: resultFilter===k ? 'white' : '#4A5568',
@@ -543,15 +546,22 @@ export function ScannerPanel(): React.JSX.Element {
           </HStack>
           <Box maxH="300px" overflowY="auto" mt="8px" fontSize="11px">
             <table style={{width:'100%', borderCollapse:'collapse'}}>
-              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>头像</th><th style={{textAlign:'left'}}>签名</th><th style={{textAlign:'left'}}>昵称</th><th>#</th><th>错误</th></tr></thead>
+              <thead><tr style={{background:'#F7FAFC'}}><th style={{padding:'6px', textAlign:'left'}}>号码</th><th>开通</th><th>活跃度</th><th>头像</th><th style={{textAlign:'left'}}>签名</th><th style={{textAlign:'left'}}>昵称</th><th>#</th><th>错误</th></tr></thead>
               <tbody>
                 {selected.results.filter((r:any)=>{
-                  if (!(resultFilter==='all' ? true : resultFilter==='valid' ? r.exists_flag : !r.exists_flag)) return false;
+                  if (resultFilter === 'valid' && !r.exists_flag) return false;
+                  if (resultFilter === 'invalid' && r.exists_flag) return false;
+                  if (resultFilter === 'active' && !(r.exists_flag && r.active_flag === 1)) return false;
+                  if (resultFilter === 'inactive' && !(r.exists_flag && r.active_flag === 0)) return false;
+                  if (resultFilter === 'avatar' && !(r.exists_flag && r.has_avatar)) return false;
+                  if (resultFilter === 'avatar_no' && !(r.exists_flag && !r.has_avatar)) return false;
+                  if (resultFilter === 'signature' && !(r.exists_flag && r.status_msg)) return false;
+                  if (resultFilter === 'signature_no' && !(r.exists_flag && !r.status_msg)) return false;
                   if (!kw.trim()) return true;
                   const k = kw.trim().toLowerCase();
                   return String(r.phone||'').includes(k) || String(r.status_msg||'').toLowerCase().includes(k) || String(r.pushname||'').toLowerCase().includes(k);
                 }).map((r:any,i:number)=>(
-                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', maxWidth:'180px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.status_msg || ''}</td><td style={{fontSize:'10px', maxWidth:'120px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.pushname || ''}</td><td style={{textAlign:'center', fontSize:'10px', color:'#718096'}}>{r.checker_id === -1 ? '账号' : (r.checker_id === -2 || r.checker_id == null ? '' : r.checker_id)}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
+                  <tr key={i} style={{borderTop:'1px solid #EDF2F7'}}><td style={{padding:'6px'}}>{r.phone}</td><td style={{textAlign:'center'}}>{r.exists_flag ? '是' : '否'}</td><td style={{textAlign:'center', fontWeight: r.active_flag === 1 ? 700 : 400, color: r.active_flag === 1 ? '#01B574' : r.active_flag === 0 ? '#A0AEC0' : '#CBD5E0'}}>{r.active_flag === 1 ? '是' : r.active_flag === 0 ? '否' : '—'}</td><td style={{textAlign:'center'}}>{r.has_avatar ? '是' : '否'}</td><td style={{fontSize:'10px', maxWidth:'180px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.status_msg || ''}</td><td style={{fontSize:'10px', maxWidth:'120px', overflow:'hidden', textOverflow:'ellipsis'}}>{r.pushname || ''}</td><td style={{textAlign:'center', fontSize:'10px', color:'#718096'}}>{r.checker_id === -1 ? '账号' : (r.checker_id === -2 || r.checker_id == null ? '' : r.checker_id)}</td><td style={{fontSize:'10px', color:'#718096'}}>{r.error || (r.avatar_url ? '有头像' : '')}</td></tr>
                 ))}
               </tbody>
             </table>

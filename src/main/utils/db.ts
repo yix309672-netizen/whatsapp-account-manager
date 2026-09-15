@@ -283,6 +283,15 @@ function runMigrations(): void {
     if ((r.changes as number) > 0) logger.info(`Reconciled ${r.changes} interrupted scanner task(s) to paused`);
   } catch (err) { logger.warn('Reconcile scanner tasks failed:', err); }
 
+  // 迁移：scanner_results 新增 active_flag 列（活跃度：-1=未检测，0=不活跃，1=活跃）
+  try {
+    const arCols = db.prepare('PRAGMA table_info(scanner_results)').all() as Array<{ name: string }>;
+    if (!arCols.some((c) => c.name === 'active_flag')) {
+      db.exec('ALTER TABLE scanner_results ADD COLUMN active_flag INTEGER NOT NULL DEFAULT -1');
+      logger.info('Migrated scanner_results table: added active_flag column');
+    }
+  } catch (err) { logger.warn('Migrate scanner_results active_flag failed:', err); }
+
   // 迁移：scanner_results 新增 checker_id 列（哪号查的；-1=Web通道，-2=老数据未知；熔断按号隔离用）
   try {
     const srCols2 = db.prepare('PRAGMA table_info(scanner_results)').all() as Array<{ name: string }>;
