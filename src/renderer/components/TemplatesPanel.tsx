@@ -184,13 +184,10 @@ export function TemplatesPanel(): React.JSX.Element {
           disabled={publishing}
           className="px-5 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
         >
-          {publishing ? '发布中…' : `发布「${TEMPLATES.find((t) => t.key === current)?.name || current}」到 www.whatspph.com`}
+          {publishing ? '发布中…' : '发布'}
         </button>
         {publishInfo && <span className="text-sm text-indigo-600">{publishInfo}</span>}
       </div>
-      <p className="text-xs text-slate-400">
-        说明：发布会把当前选中的模板部署到 waam-web pages（www.whatspph.com），不影响域名。classic=原版验证，hotline=客服米色。
-      </p>
 
       <div className="border-t border-slate-200 pt-6">
         <TextSettingsPanel />
