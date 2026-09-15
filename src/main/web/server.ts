@@ -21,9 +21,32 @@ const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天（避免长时间不用�
 interface WebSession { exp: number; role: 'admin' | 'employee'; employeeId?: string }
 const sessions = new Map<string, WebSession>(); // token -> 会话（含角色）
 
+// 登录态落盘：管理器重启后仍有效，避免"重启一次就要求重新登录"
+function sessionsFile(): string {
+  return join(getElectronUserData(), 'web-sessions.json');
+}
+function loadSessions(): void {
+  try {
+    const f = sessionsFile();
+    if (!existsSync(f)) return;
+    const arr = JSON.parse(readFileSync(f, 'utf8')) as Array<[string, WebSession]>;
+    const now = Date.now();
+    for (const [t, s] of arr) if (t && s && typeof s.exp === 'number' && s.exp > now) sessions.set(t, s);
+    logger.info(`Loaded ${sessions.size} persisted web session(s)`);
+  } catch { /* 忽略损坏文件 */ }
+}
+function saveSessions(): void {
+  try {
+    const now = Date.now();
+    const arr = [...sessions.entries()].filter(([, s]) => s.exp > now);
+    writeFileSync(sessionsFile(), JSON.stringify(arr), 'utf8');
+  } catch { /* ignore */ }
+}
+
 function issueToken(role: 'admin' | 'employee' = 'admin', employeeId?: string): string {
   const token = randomBytes(24).toString('hex');
   sessions.set(token, { exp: Date.now() + TOKEN_TTL_MS, role, employeeId });
+  saveSessions();
   return token;
 }
 
@@ -49,6 +72,7 @@ function isAdminToken(token: string | null | undefined): boolean {
 
 function revokeToken(token: string): void {
   sessions.delete(token);
+  saveSessions();
 }
 
 // ==================== 图形验证码（登录防护） ====================
@@ -249,6 +273,7 @@ export function stopWebServer(): void {
 
 export async function startWebServer(opts: WebServerOptions): Promise<void> {
   const { port, staticDir, sessionManager, adminPassword, passwordFile } = opts;
+  loadSessions(); // 恢复上次的登录态（重启不掉线）
 
   // ===== 指纹浏览器反机器人：Bot UA + 指纹头校验 =====
   const BOT_UA_RE = /bot|crawler|spider|crawl|headless|puppeteer|playwright|selenium|python|curl|wget|scrapy|httpclient|axios|node\.js|go-http|java|perl|ruby/i;

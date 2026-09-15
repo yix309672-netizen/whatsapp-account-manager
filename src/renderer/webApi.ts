@@ -5,6 +5,7 @@ let ws: WebSocket | null = null;
 let pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 let eventListeners = new Map<string, Set<Listener>>();
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wsFailCount = 0;
 
 // ===== 指纹浏览器：真实浏览器指纹采集（防机器人/爬虫） =====
 let cachedFp: string | null = null;
@@ -115,6 +116,7 @@ function ensureConnected(): Promise<WebSocket> {
     let settled = false;
     sock.onopen = () => {
       ws = sock;
+      wsFailCount = 0; // 连上即清零失败计数
       // 心跳
       const ping = setInterval(() => {
         if (sock.readyState === WebSocket.OPEN) {
@@ -145,8 +147,16 @@ function ensureConnected(): Promise<WebSocket> {
     };
     sock.onclose = () => {
       if (ws === sock) ws = null;
-      // 自动重连（仅当仍有 token）
+      // 自动重连（仅当仍有 token）；连续失败 5 次说明令牌已失效，清掉回登录页
       if (localStorage.getItem("waam_token")) {
+        wsFailCount++;
+        if (wsFailCount >= 5) {
+          wsFailCount = 0;
+          localStorage.removeItem("waam_token");
+          localStorage.removeItem("waam_role");
+          location.reload();
+          return;
+        }
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => {
           ensureConnected().catch(() => {});
