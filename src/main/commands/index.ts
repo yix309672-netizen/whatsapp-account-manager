@@ -568,9 +568,10 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
 
     case 'employee:unassign': {
       const accountId = params.accountId as string;
-      db.prepare('UPDATE accounts SET assigned_to = NULL WHERE id = ?').run(accountId);
+      // 收回时一并清除设备指纹绑定：否则账号带着"已绑定其他设备"回到管理器，谁都登不上
+      db.prepare('UPDATE accounts SET assigned_to = NULL, machine_fingerprint = NULL WHERE id = ?').run(accountId);
       db.prepare('INSERT INTO login_logs (account_id, action, detail) VALUES (?, ?, ?)')
-        .run(accountId, 'unassign', '解除分配');
+        .run(accountId, 'unassign', '解除分配（并清除设备指纹绑定）');
       return { success: true };
     }
 
