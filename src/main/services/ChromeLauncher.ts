@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { join } from 'path';
 import { accessSync } from 'fs';
-import { spawn, SpawnOptions } from 'child_process';
+import { spawn, execFileSync, SpawnOptions } from 'child_process';
 import { getFreePort } from '../utils/port';
 import { logger } from '../utils/logger';
 
@@ -57,7 +57,40 @@ function findChromeExecutable(): string {
     return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
   }
 
+  // Linux：优先常见安装路径（apt 的 google-chrome / chromium），都找不到再靠 PATH
+  const linuxPaths = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/opt/google/chrome/chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium'
+  ];
+  for (const p of linuxPaths) {
+    try {
+      accessSync(p);
+      return p;
+    } catch {}
+  }
   return 'google-chrome';
+}
+
+/**
+ * Linux 上以 root 运行（systemd 服务、Docker）时 Chrome 拒绝启动沙箱，必须显式加 --no-sandbox。
+ * 可用 WAAM_CHROME_NO_SANDBOX=1 强制开启、=0 强制关闭；未设置时按「是否 root」自动判断。
+ */
+function needChromeNoSandbox(): boolean {
+  const env = process.env.WAAM_CHROME_NO_SANDBOX;
+  if (env === '1' || env === 'true') return true;
+  if (env === '0' || env === 'false') return false;
+  if (process.platform === 'linux') {
+    try {
+      return typeof process.getuid === 'function' && process.getuid() === 0;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 async function isEndpointAlive(port: number): Promise<boolean> {
@@ -110,6 +143,11 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
     args.push('--headless=new');
     args.push('--hide-scrollbars');
     args.push('--mute-audio');
+  }
+  if (needChromeNoSandbox()) {
+    args.push('--no-sandbox');
+    args.push('--disable-setuid-sandbox');
+    args.push('--disable-dev-shm-usage'); // 容器/小内存服务器上 /dev/shm 太小会崩
   }
   // 无初始 URL，whatsapp-web.js 单建 web.whatsapp.com，避免 about:blank/双 web 残留
 
@@ -248,18 +286,33 @@ export function isChromeRunning(accountId: string): boolean {
 
 export function cleanupStaleChrome(): void {
   const profileRoot = join(app.getPath('userData'), 'chrome-profiles');
-  const { execFileSync } = require('child_process');
-  const script = [
-    'Get-CimInstance Win32_Process -Filter "name=\'chrome.exe\'"',
-    `| Where-Object { $_.CommandLine -match [regex]::Escape('${profileRoot}') -and $_.CommandLine -match 'remote-debugging-port' }`,
-    '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'
-  ].join(' ');
+
+  // 跨平台：Windows 走 PowerShell/CIM，Linux/macOS 走 /proc + ps（pgrep 不一定装了，用 ps 更保险）
+  const script =
+    process.platform === 'win32'
+      ? [
+          'Get-CimInstance Win32_Process -Filter "name=\'chrome.exe\'"',
+          `| Where-Object { $_.CommandLine -match [regex]::Escape('${profileRoot}') -and $_.CommandLine -match 'remote-debugging-port' }`,
+          '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'
+        ].join(' ')
+      : [
+          'ps -eo pid=,args=',
+          `| grep -F '${profileRoot}'`,
+          "| grep -F 'remote-debugging-port'",
+          "| grep -v grep",
+          '| awk \'{print $1}\'',
+          '| xargs -r kill -9 2>/dev/null',
+          '|| true'
+        ].join(' ');
+
+  const cmd = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
+  const cmdArgs =
+    process.platform === 'win32'
+      ? ['-NoProfile', '-NonInteractive', '-Command', script]
+      : ['-c', script];
+
   try {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8',
-      timeout: 15000,
-      windowsHide: true
-    });
+    execFileSync(cmd, cmdArgs, { encoding: 'utf8', timeout: 15000, windowsHide: true });
     logger.info('Cleaned up stale Chrome processes under chrome-profiles');
   } catch (err) {
     logger.warn('Cleanup stale Chrome failed:', err);

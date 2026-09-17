@@ -808,8 +808,11 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     httpServer!.once('error', reject);
-    httpServer!.listen(port, () => {
-      logger.info(`Web server listening on http://localhost:${port}`);
+    // 监听地址：默认 0.0.0.0（服务器上要能被外部访问）；只给反向代理用时
+    // 可设 WAAM_WEB_HOST=127.0.0.1，把端口彻底藏在本机。
+    const host = process.env.WAAM_WEB_HOST || '0.0.0.0';
+    httpServer!.listen(port, host, () => {
+      logger.info(`Web server listening on http://${host}:${port}`);
       resolve();
     });
   });

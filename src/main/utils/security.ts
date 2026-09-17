@@ -29,7 +29,9 @@ export function detectDebugger(): boolean {
   }
 
   // 检查调试器是否附加（Windows）
-  if (process.platform === 'win32') {
+  // 服务器/服务化部署（systemd、Docker）里每 5 秒 spawn 一次 powershell 毫无意义且拖慢主进程，
+  // 可用 WAAM_ANTIDEBUG=0 关闭整个反调试轮询（见 startAntiDebug）。
+  if (process.platform === 'win32' && process.env.WAAM_ANTIDEBUG !== '0') {
     try {
       const { execSync } = require('child_process');
       const result = execSync('powershell.exe -NoProfile -Command "Get-Process -Id ' + process.pid + ' | Select-Object -ExpandProperty DebuggerAttached"', {
@@ -51,6 +53,12 @@ export function detectDebugger(): boolean {
  */
 export function startAntiDebug(): void {
   if (debugCheckTimer) return;
+
+  // 服务化/容器部署可整体关闭轮询：WAAM_ANTIDEBUG=0
+  if (process.env.WAAM_ANTIDEBUG === '0') {
+    logger.info('Anti-debug protection disabled by WAAM_ANTIDEBUG=0');
+    return;
+  }
 
   // 启动时立即检测一次
   if (detectDebugger()) {

@@ -1,0 +1,26 @@
+[Unit]
+Description=WhatsApp Account Manager (Web)
+Documentation=file:///opt/waam/app/deploy/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 说明：Electron 需要 X11，服务器上没有桌面，用 xvfb-run 起一个虚拟显示。
+# install-server.sh 会按你的实际路径重写下面两行。
+WorkingDirectory=/opt/waam/app
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1920x1080x24" /opt/waam/app/node_modules/electron/dist/electron /opt/waam/app --no-sandbox --user-data-dir=/var/lib/waam
+EnvironmentFile=/etc/waam.env
+Environment=DISPLAY=:99
+User=root
+Restart=always
+RestartSec=5
+# 关掉 systemd 自己的 stdout 缓冲问题：日志以文件为准（/var/lib/waam/logs）
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

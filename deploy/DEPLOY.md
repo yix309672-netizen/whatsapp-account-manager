@@ -1,0 +1,149 @@
+# 部署到 Linux 云服务器（Ubuntu / Debian）
+
+> 本文是这次从零跑通后写的实操手册，命令都验证过。管理器本身是 Electron 应用，
+> 「服务器模式」= 不带窗口常驻后台 + 内置 Web 后台（默认 `9527`），浏览器远程用全部管理功能。
+
+---
+
+## 0. 先搞清楚它到底是什么
+
+| 角色 | 说明 |
+|---|---|
+| 管理器（本仓库） | Electron 主进程常驻，内置 HTTP + WebSocket 服务（`src/main/web/server.ts`），浏览器操作全部管理功能 |
+| 登录用户名 | 固定 **小易**（`src/main/utils/db.ts` 首次建库时写入） |
+| 登录密码 | 首次启动时取环境变量 `WAAM_ADMIN_PASSWORD`，没有就随机生成写入 `userData/web-admin-password.txt` |
+| 数据目录 | 数据库 `accounts.db`、Chrome 配置、WhatsApp 会话、日志、导出文件都在 Electron 的 `userData` 目录 |
+| Chrome | 每个账号一个独立 Chrome 实例（`ChromeLauncher.ts`），**服务器必须装 Chrome**，浏览器本身是 headless 跑的 |
+| 员工端 | 员工用的 `kuai-z` 通过中转（Cloudflare Worker relay）连回管理器；自建中转见 `cloudflare-worker/` |
+
+## 1. 环境要求
+
+- Ubuntu 20.04 / 22.04 / 24.04 或 Debian 11+，root 或 sudo
+- 至少 2 核 4G 内存（每个已登录账号一个 Chrome，1 个账号约 300–500MB）
+- 磁盘 20G+（Chrome 配置 + WhatsApp 缓存会长）
+- 能科学/稳定访问 `web.whatsapp.com`（国内服务器需自行解决出口）
+- **没有桌面的服务器也要装 xvfb**：Electron 主进程需要 X11，哪怕它不开窗口
+
+## 2. 一键部署
+
+```bash
+# 上传或直接在服务器上拉脚本
+git clone https://github.com/yix309672-netizen/whatsapp-account-manager.git /opt/waam/app
+cd /opt/waam/app
+
+# 交互式（会问你要管理员密码）
+sudo bash deploy/install-server.sh
+
+# 或非交互
+sudo WAAM_ADMIN_PASSWORD='换成你的强密码' bash deploy/install-server.sh
+```
+
+脚本会依次做：装 xvfb/Chrome/编译工具 → 装 Node 20 → 拉代码 → `npm install` →
+`electron-vite build` → 写 `/etc/waam.env` → 装并启动 systemd 服务 `waam` → 自检端口。
+
+脚本可用环境变量覆盖：`REPO_URL`、`APP_DIR`、`WAAM_WEB_PORT`、`NODE_MAJOR`、`SERVICE_USER`。
+
+## 3. 部署后自检
+
+```bash
+systemctl status waam                    # 应为 active (running)
+journalctl -u waam -n 80 --no-pager      # 看启动日志
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9527/     # 期望 200
+```
+
+浏览器打开 `http://服务器IP:9527`：
+
+- [ ] 登录页出现，带图形验证码
+- [ ] 错密码被拒（连续 5 次会封 30 分钟，这是设计如此）
+- [ ] 用「小易 + 你设的密码」进入管理器
+- [ ] 账号列表能加载（空列表也正常）
+- [ ] 新建账号 → 登录 → 出二维码/配对码
+- [ ] `systemctl restart waam` 后无需重新登录（登录态落盘 7 天）
+
+> 提示：页面静态资源和 API 都在 `9527`，但**前端所有命令都走 WebSocket `/ws`**。
+> 如果你的反向代理没转发 `Upgrade` 头，会出现「页面能开、点什么都转圈」——用 `deploy/nginx-waam.conf`。
+
+## 4. 对外访问：域名 + HTTPS
+
+```bash
+apt-get install -y nginx
+cp deploy/nginx-waam.conf /etc/nginx/sites-available/waam
+sed -i 's/guanli.example.com/你的域名/g' /etc/nginx/sites-available/waam
+ln -sf /etc/nginx/sites-available/waam /etc/nginx/sites-enabled/waam
+nginx -t && systemctl reload nginx
+
+# 证书
+apt-get install -y certbot python3-certbot-nginx
+certbot --nginx -d 你的域名
+```
+
+安全建议（强烈）：
+
+1. 只放行 `80/443`，把 `9527` 关在服务器内部：
+   `/etc/waam.env` 改 `WAAM_WEB_HOST=127.0.0.1` 后 `systemctl restart waam`
+2. 不要在公网裸奔 `9527`（虽然有验证码 + 限流，但没必要）
+3. 想更省事可以用 Cloudflare Tunnel 代替 Nginx：`cloudflared tunnel --url http://127.0.0.1:9527`
+
+## 5. 环境变量一览（`/etc/waam.env`）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `WAAM_WEB_PORT` | `9527` | Web 后台端口 |
+| `WAAM_WEB_HOST` | `0.0.0.0` | 监听地址，只走反代时设 `127.0.0.1` |
+| `WAAM_ADMIN_PASSWORD` | 空 | 首次建库时的管理员密码；库里已有账号后改这个**不会**改密码，要改走后台改密码接口 |
+| `WAAM_ANTIDEBUG` | 开 | `0` 关闭反调试轮询（服务器建议关，省掉每 5 秒一次进程探测） |
+| `WAAM_NO_CONSOLE` | 开 | `1` 完全不写控制台输出（日志仍写文件） |
+| `WAAM_CHROME_NO_SANDBOX` | 自动 | root 运行时自动加 `--no-sandbox`；也可手动 `1`/`0` |
+
+## 6. 日常运维
+
+```bash
+systemctl restart waam          # 重启
+journalctl -u waam -f           # 实时日志
+tail -f /var/lib/waam/logs/app-$(date +%F).log     # 应用日志（更全）
+systemctl disable --now waam    # 停用
+```
+
+更新到最新代码：
+
+```bash
+cd /opt/waam/app
+git pull
+npm install --no-audit --no-fund
+npx electron-vite build
+systemctl restart waam
+```
+
+备份（数据库 + 会话）：
+
+```bash
+systemctl stop waam
+tar czf ~/waam-backup-$(date +%F).tar.gz /var/lib/waam
+systemctl start waam
+```
+
+## 7. 这次为 Linux 改了什么（相对原仓库）
+
+| 文件 | 改动 | 原因 |
+|---|---|---|
+| `src/main/utils/logger.ts` | `stdout/stderr` 加 EPIPE 兜底、连续失败自动停用控制台输出、致命日志只落文件 | 实测：stdout 管道断开后写日志抛 EPIPE，**会把登录请求卡死**（服务化部署必踩） |
+| `src/main/services/ChromeLauncher.ts` | Chrome 路径探测加 Linux 分支；`cleanupStaleChrome` 增加 `ps` 版实现；root 下自动加 `--no-sandbox --disable-dev-shm-usage` | 原来只有 Windows 的 PowerShell 实现，Linux 上清理会报错；root 跑 Chrome 必须 `--no-sandbox` |
+| `src/main/utils/security.ts` | 反调试的 Windows 进程探测可用 `WAAM_ANTIDEBUG=0` 关闭 | 服务化后每 5 秒 spawn 一次探测毫无意义还拖慢主进程 |
+| `src/main/web/server.ts` | 监听地址可用 `WAAM_WEB_HOST` 配置（默认 `0.0.0.0`） | 方便「只给反代用」时收回到本机 |
+| `postcss.config.js` → `postcss.config.cjs` | 改成 CommonJS | 原文件是 ESM `export default`，而 `package.json` 没有 `"type": "module"`，`electron-vite build` 直接报 `Unexpected token 'export'` |
+
+## 8. 已知坑 / 排错
+
+| 现象 | 原因与处理 |
+|---|---|
+| 构建报 `Failed to load PostCSS config: Unexpected token 'export'` | 已修（见上表）。若你改回去了，恢复成 `postcss.config.cjs` |
+| `better-sqlite3` 装不上：`Could not find any Visual Studio installation` / `node-gyp` 失败 | 用 Node 20 构建（Node 26 没有对应预编译包）；Linux 上装 `build-essential python3` 即可 |
+| 登录接口一直转圈不返回 | stdout 管道断开导致（已修）。老版本可临时用 `WAAM_NO_CONSOLE=1` 规避，或让服务以文件重定向 stdio 启动 |
+| 页面能开、操作一直转圈 | 反向代理没转发 WebSocket `Upgrade` 头 |
+| 账号登录报 `Chrome 调试端点连接超时` | 没装 Chrome，或 root 下缺 `--no-sandbox`：确认 `google-chrome --version` 可用、`WAAM_CHROME_NO_SANDBOX=1` |
+| 服务起来就退出 | `journalctl -u waam -n 50`；常见是 `DISPLAY` 缺失（服务里必须走 `xvfb-run`）或 9527 被占用 |
+| 想换管理员密码 | 管理后台改密码接口（改完所有 token 失效需重登）；或删库重来：停服务 → 删 `/var/lib/waam/database` → 设 `WAAM_ADMIN_PASSWORD` → 启动 |
+
+> 注意：仓库根目录的 `WEB_MODE.md` 里写的 `--web` 参数在当前代码里已经没有了
+> （`src/main/index.ts` 里管理端**始终**启动 Web 服务，不需要也不识别 `--web`）。
+> 直接跑程序就是 Web 模式。
