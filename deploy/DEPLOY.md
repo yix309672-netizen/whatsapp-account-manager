@@ -51,7 +51,7 @@ journalctl -u waam -n 80 --no-pager      # 看启动日志
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9527/     # 期望 200
 ```
 
-浏览器打开 `http://服务器IP:9527`：
+浏览器打开 `http://服务器IP:9527`（若服务商封了端口，见第 4 节走隧道）：
 
 - [ ] 登录页出现，带图形验证码
 - [ ] 错密码被拒（连续 5 次会封 30 分钟，这是设计如此）
@@ -83,6 +83,40 @@ certbot --nginx -d 你的域名
    `/etc/waam.env` 改 `WAAM_WEB_HOST=127.0.0.1` 后 `systemctl restart waam`
 2. 不要在公网裸奔 `9527`（虽然有验证码 + 限流，但没必要）
 3. 想更省事可以用 Cloudflare Tunnel 代替 Nginx：`cloudflared tunnel --url http://127.0.0.1:9527`
+
+### 4.1 服务商封了 9527？直接走 Cloudflare Tunnel
+
+很多云服务商对外只开 80/443/22，`9527` 从公网连不上（本机 `Test-NetConnection` 会失败）。
+这时不要折腾防火墙，直接上隧道：
+
+```bash
+# 装 cloudflared
+curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+dpkg -i /tmp/cloudflared.deb
+
+# A) 临时试跑（随机域名，无需账号，适合先看效果）
+systemd-run --unit=waam-tunnel-quick --collect \
+  /usr/local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:9527
+sleep 15
+journalctl -u waam-tunnel-quick --no-pager | grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' | head -1
+
+# B) 正式：绑自己的域名（需要浏览器点一次授权）
+cloudflared tunnel login                     # 打开它给的 dash.cloudflare.com 链接并 Authorize
+cloudflared tunnel create waam               # 生成 tunnel 凭据
+cloudflared tunnel route dns waam guanli.你的域名
+cat > /etc/cloudflared/config.yml <<'EOF'
+tunnel: waam
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: guanli.你的域名
+    service: http://127.0.0.1:9527
+  - service: http_status:404
+EOF
+cloudflared service install                  # 装成 systemd 服务（开机自启）
+systemctl restart cloudflared
+```
+
+访问 `https://guanli.你的域名`（Cloudflare 自带 HTTPS，WebSocket 也会被正常转发）。
 
 ## 5. 环境变量一览（`/etc/waam.env`）
 
@@ -132,6 +166,23 @@ systemctl start waam
 | `src/main/web/server.ts` | 监听地址可用 `WAAM_WEB_HOST` 配置（默认 `0.0.0.0`） | 方便「只给反代用」时收回到本机 |
 | `postcss.config.js` → `postcss.config.cjs` | 改成 CommonJS | 原文件是 ESM `export default`，而 `package.json` 没有 `"type": "module"`，`electron-vite build` 直接报 `Unexpected token 'export'` |
 
+## 7.1 部署时踩到的三个硬坑（已在脚本里处理）
+
+1. **better-sqlite3 的 ABI 必须是 Electron 的，不是 Node 的**
+   `npm install` 装出来的是 Node ABI（`NODE_MODULE_VERSION 115`），Electron 30 需要 `123`，
+   启动时报 `was compiled against a different Node.js version`。必须补一条：
+   ```bash
+   npm_config_runtime=electron npm_config_target=30.5.1 \
+   npm_config_disturl=https://electronjs.org/headers \
+     npm rebuild better-sqlite3 --foreground-scripts
+   ```
+2. **Ubuntu 24.04 的 `xvfb-run` 不能带 `-s/--server-args`**
+   该脚本用未加引号的 `$@` 执行命令，`-s` 的值会被二次拆词，把命令参数全部破坏
+   （报 `/usr/bin/xvfb-run: 184: 0: not found`，且 `tries` 被重置导致 10 次重试全废）。
+   用默认屏幕参数即可 —— WhatsApp 本身是走 CDP 的 headless Chrome，不需要大屏。
+3. **树莓/云服务商常封 9527**，公网连不上不是服务没起来。本机 `curl 127.0.0.1:9527` 能通
+   就说明服务正常，对外用 Cloudflare Tunnel（见 4.1）。
+
 ## 8. 已知坑 / 排错
 
 | 现象 | 原因与处理 |
@@ -142,6 +193,9 @@ systemctl start waam
 | 页面能开、操作一直转圈 | 反向代理没转发 WebSocket `Upgrade` 头 |
 | 账号登录报 `Chrome 调试端点连接超时` | 没装 Chrome，或 root 下缺 `--no-sandbox`：确认 `google-chrome --version` 可用、`WAAM_CHROME_NO_SANDBOX=1` |
 | 服务起来就退出 | `journalctl -u waam -n 50`；常见是 `DISPLAY` 缺失（服务里必须走 `xvfb-run`）或 9527 被占用 |
+| `xvfb-run: 184: 0: not found` | 给 `xvfb-run` 传了 `-s/--server-args`，去掉即可（见 7.1 第 2 条） |
+| `was compiled against a different Node.js version` | better-sqlite3 的 ABI 不对，按 7.1 第 1 条重建 |
+| 公网打不开但本机能 `curl` 通 | 服务商封了端口，走 Cloudflare Tunnel（见 4.1） |
 | 想换管理员密码 | 管理后台改密码接口（改完所有 token 失效需重登）；或删库重来：停服务 → 删 `/var/lib/waam/database` → 设 `WAAM_ADMIN_PASSWORD` → 启动 |
 
 > 注意：仓库根目录的 `WEB_MODE.md` 里写的 `--web` 参数在当前代码里已经没有了
