@@ -141,7 +141,9 @@ export function AccountCard({ account, index }: AccountCardProps): React.JSX.Ele
           <button
             onClick={() => {
               if (window.confirm(`确定删除账号「${phoneDisplay}」？此操作不可恢复。`)) {
-                removeAccount(account.id);
+                // 必须走 run() 包一层：直接 removeAccount() 不 await 也不 catch，
+                // 删除失败时用户看不到任何反馈，还会留下未处理的 promise rejection。
+                void run(() => removeAccount(account.id));
               }
             }}
             style={{

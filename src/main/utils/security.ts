@@ -150,6 +150,28 @@ const RATE_LIMIT_CONFIG = {
 };
 
 /**
+ * 容量上限。
+ * ⚠️ 修复：以前这个 Map 没有上限，而 key 里包含客户端可控的部分
+ * （IP、手机号、用户名）。攻击者用随机值灌入即可让内存无界增长
+ * （每小时清理只删"已过封锁期"的条目，纯计数条目**永不删除**）。
+ */
+const RATE_LIMIT_MAX_ENTRIES = 20_000;
+
+function evictRateLimitMap(): void {
+  if (rateLimitMap.size <= RATE_LIMIT_MAX_ENTRIES) return;
+  // 按最后一次尝试时间升序淘汰最旧的，直到降到容量的 75%
+  const entries = [...rateLimitMap.entries()].sort(
+    (a, b) => a[1].lastAttempt - b[1].lastAttempt
+  );
+  const target = Math.floor(RATE_LIMIT_MAX_ENTRIES * 0.75);
+  const removeCount = rateLimitMap.size - target;
+  for (let i = 0; i < removeCount && i < entries.length; i++) {
+    rateLimitMap.delete(entries[i][0]);
+  }
+  logger.warn(`rateLimitMap 超出上限，已淘汰 ${removeCount} 条最旧记录`);
+}
+
+/**
  * 检查 IP/账号 是否被限流
  */
 export function checkRateLimit(key: string): { allowed: boolean; retryAfterMs?: number } {
@@ -207,6 +229,7 @@ export function recordFailedAttempt(key: string): void {
     entry.lastAttempt = now;
     rateLimitMap.set(key, entry);
   }
+  evictRateLimitMap();
 }
 
 /**
@@ -376,12 +399,15 @@ export function initSecurity(): void {
   saveIntegrityHash();
 
   // 3. 清理过期的限流记录（每小时清理一次）
+  // ⚠️ 修复：旧条件只删 blockedUntil 已过期的条目，纯计数（count 型）条目**永不删除**，
+  // 长期运行会一直堆积。现在按"最后一次尝试 + 窗口"判定过期。
   setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of rateLimitMap) {
-      if (entry.blockedUntil > 0 && entry.blockedUntil < now) {
-        rateLimitMap.delete(key);
-      }
+      const expired = entry.blockedUntil > 0
+        ? entry.blockedUntil < now
+        : entry.lastAttempt + RATE_LIMIT_CONFIG.windowMs < now;
+      if (expired) rateLimitMap.delete(key);
     }
   }, 60 * 60 * 1000);
 

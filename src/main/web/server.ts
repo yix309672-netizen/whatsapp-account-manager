@@ -266,13 +266,72 @@ function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string
   }
 }
 
+/**
+ * 读取请求体。
+ *
+ * ⚠️ 安全/稳定性修复：以前没有任何上限、超时，也不处理连接中断。
+ *  - 声明 `Content-Length: 500000000` 持续发送 → chunks 全量驻留 + Buffer.concat 再复制一份，
+ *    峰值约 2 倍体积，可直接把主进程 OOM（连带所有 WhatsApp 会话掉线）；
+ *  - 声明长度只发一部分就 RST → Node 只 emit aborted/close，**不 emit end/error**，
+ *    Promise 永不 settle，handler 永远 await 挂住；
+ *  - 长度不符时会一直占着 socket 到默认 requestTimeout(300s)。
+ * 现在：64KB 上限 + 10s 超时 + aborted/close 兜底，超限直接 destroy。
+ */
+const MAX_BODY_BYTES = 64 * 1024;
+const BODY_TIMEOUT_MS = 10_000;
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    let size = 0;
+    let done = false;
+    const finish = (fn: () => void): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        try { req.destroy(); } catch { /* ignore */ }
+        reject(new Error('body timeout'));
+      });
+    }, BODY_TIMEOUT_MS);
+
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        finish(() => {
+          try { req.destroy(); } catch { /* ignore */ }
+          reject(new Error('body too large'));
+        });
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => finish(() => resolve(Buffer.concat(chunks).toString('utf8'))));
+    req.on('error', (err) => finish(() => reject(err)));
+    // 客户端中断时 Node 不会 emit end/error，必须自己兜住
+    req.on('aborted', () => finish(() => reject(new Error('aborted'))));
+    req.on('close', () => finish(() => reject(new Error('closed'))));
   });
+}
+
+/** 统一的请求体读取 + 错误响应：超限 413，其余 400 */
+async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+  try {
+    return await readBody(req);
+  } catch (err) {
+    const msg = (err as Error).message || '';
+    if (msg === 'body too large') {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '请求体过大' }));
+    } else {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: '请求体读取失败' }));
+    }
+    return null;
+  }
 }
 
 // ==================== 可信 IP 解析 ====================
@@ -532,7 +591,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         return;
       }
 
-      const body = await readBody(req).catch(() => '');
+      const body = await readJsonBody(req, res);
+      if (body === null) return; // 已回 413/400
       let username = '';
       let password = '';
       let captchaId = '';
@@ -589,7 +649,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '登录尝试过于频繁，请稍后再试' }));
         return;
       }
-      const body = await readBody(req).catch(() => '');
+      const body = await readJsonBody(req, res);
+      if (body === null) return; // 已回 413/400
       let username = '', password = '', captchaId = '', captcha = '', fp = '';
       try {
         const d = JSON.parse(body);
@@ -639,7 +700,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '未授权' }));
         return;
       }
-      const body = await readBody(req).catch(() => '');
+      const body = await readJsonBody(req, res);
+      if (body === null) return; // 已回 413/400
       let username = '', oldPwd = '', newPwd = '';
       try {
         const d = JSON.parse(body);
@@ -675,7 +737,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '请求过于频繁，请稍后重试' }));
         return;
       }
-      const body = await readBody(req).catch(() => '');
+      const body = await readJsonBody(req, res);
+      if (body === null) return; // 已回 413/400
       let phone = '';
       try { phone = String(JSON.parse(body).phone || '').replace(/[^0-9]/g,''); } catch { phone = ''; }
       if (!phone || phone.length < 8) {
@@ -745,7 +808,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '发送过于频繁，请稍后再试' }));
         return;
       }
-      const body = await readBody(req).catch(() => '');
+      const body = await readJsonBody(req, res);
+      if (body === null) return; // 已回 413/400
       let key = '';
       let content = '';
       let claim = '';

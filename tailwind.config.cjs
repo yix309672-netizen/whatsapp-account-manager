@@ -1,5 +1,8 @@
+// tailwind.config.cjs — 与 postcss.config.cjs 同理：
+// package.json 没有 "type": "module"，ESM 的 export default 只能靠 Tailwind 内部用
+// jiti 转译才不报错（和之前 postcss 那个构建失败的坑同源）。用 CJS 更稳。
 /** @type {import('tailwindcss').Config} */
-export default {
+module.exports = {
   content: [
     "./src/renderer/**/*.{js,ts,jsx,tsx}",
     "./src/renderer/index.html",

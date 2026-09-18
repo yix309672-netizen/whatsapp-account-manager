@@ -1,8 +1,8 @@
 import { app, ipcMain } from 'electron';
 import { join } from 'path';
-import { initDatabase, maintenanceCleanup } from './utils/db';
+import { initDatabase, maintenanceCleanup, closeDatabase } from './utils/db';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
-import { cleanupStaleChrome } from './services/ChromeLauncher';
+import { cleanupStaleChrome, closeAllChrome } from './services/ChromeLauncher';
 import { RelayClient, setRelayInstance } from './services/RelayClient';
 import { loadRelaySettings, ensureAccessCode } from './services/relayConfig';
 import { logger } from './utils/logger';
@@ -129,8 +129,40 @@ app.on('window-all-closed', () => {
   // 管理端无窗口，不自动退出；由 before-quit 统一清理
 });
 
-app.on('before-quit', async () => {
+/**
+ * 退出清理。
+ *
+ * ⚠️ 修复说明：
+ *  1) Electron **不会 await** before-quit 里的 async 处理器。以前直接 `await shutdownAll()`
+ *     时主进程可能先退出，导致 `detached + unref` 的 Chrome 全部变成孤儿进程
+ *     （实测重启后残留 13 个 Chrome、占用几百 MB）。
+ *     现在用 preventDefault() 拦住退出，清理完再 app.exit()。
+ *  2) shutdownAll 只遍历 sessions；chromeInstances 里那些**没有对应 session** 的 Chrome
+ *     （启动超时泄漏、未成功 startSession 的新实例）永远关不掉。这里补 closeAllChrome() 兜底。
+ *  3) closeDatabase() 之前从未被调用 → WAL 不 checkpoint，单独拷 accounts.db 会丢最近写入。
+ */
+let quitting = false;
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+
   stopWebServer();
   cleanupSecurity();
-  await sessionManager.shutdownAll();
+  // 先同步杀掉所有已知 Chrome（不依赖 CDP 往返，最可靠）
+  try { closeAllChrome(); } catch (err) { logger.warn('closeAllChrome failed:', err); }
+
+  const hardExit = setTimeout(() => {
+    logger.warn('Graceful shutdown timed out, forcing exit');
+    try { closeDatabase(); } catch { /* ignore */ }
+    app.exit(0);
+  }, 8000);
+
+  sessionManager.shutdownAll()
+    .catch((err) => logger.warn('shutdownAll failed:', err))
+    .finally(() => {
+      clearTimeout(hardExit);
+      try { closeDatabase(); } catch (err) { logger.warn('closeDatabase failed:', err); }
+      app.exit(0);
+    });
 });

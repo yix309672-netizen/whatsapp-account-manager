@@ -9,6 +9,9 @@ import { launchChromeForAccount, closeChromeForAccount } from '../services/Chrom
 import { hashPassword, verifyPassword, createEmployeeToken, resolveEmployeeToken, clearEmployeeSessions } from '../services/employeeAuth';
 import { loadRelaySettings, saveRelaySettings, ensureAccessCode, regenerateAccessCode } from '../services/relayConfig';
 import { getRelayInstance } from '../services/RelayClient';
+// 静态导入（与 WhatsAppSessionManager 同样的理由：动态 require 在打包后相对路径不存在，
+// 会被 try/catch 吞掉导致功能静默失效）。这里用于把监控日志广播到 Web 端。
+import { broadcastWebEvent } from '../web/server';
 import { logger } from '../utils/logger';
 import { parseUa } from '../utils/ua';
 import { checkRateLimit, recordFailedAttempt, clearRateLimit, auditLog, sanitizeSql, isValidUsername, getAuditLogs } from '../utils/security';
@@ -824,10 +827,19 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     }
 
     // 员工端账户权限：员工只允许看到分配给自己的账号（account:list 在员工场景下用 employee:list_mine）
+    // 返回结构：{ employee: {...}, accounts: [{accountId,status}] }
+    // ⚠️ 以前只返回 accounts 数组，而前端 EmployeeWebPanel 是当对象读 st.username/st.name，
+    // 结果员工端顶部"我的账号 · 姓名"永远为空。这里把员工信息一起带上（前端同步适配）。
     case 'employee:my_status': {
       const employeeId = requireEmployee(ctx);
       const accounts = db.prepare('SELECT id FROM accounts WHERE assigned_to = ?').all(employeeId) as Array<{ id: string }>;
-      return accounts.map((a) => ({ accountId: a.id, status: ctx.sessionManager.getStatus(a.id) || 'offline' }));
+      const emp = db.prepare('SELECT id, username, name FROM employees WHERE id = ?').get(employeeId) as
+        | { id: string; username: string; name: string | null }
+        | undefined;
+      return {
+        employee: emp ? { id: emp.id, username: emp.username, name: emp.name || emp.username } : null,
+        accounts: accounts.map((a) => ({ accountId: a.id, status: ctx.sessionManager.getStatus(a.id) || 'offline' }))
+      };
     }
 
     case 'browser:open': {
@@ -1032,9 +1044,13 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         clientId: ctx.clientId || '',
         created_at: Math.floor(Date.now() / 1000)
       };
+      // 实时推送监控日志。
+      // ⚠️ 管理端已纯 Web 化，**没有 BrowserWindow**，只往窗口发等于永远没人收到
+      // （统计页的"实时监控日志"因此一直不更新）。必须同时走 Web 广播。
       BrowserWindow.getAllWindows().forEach((win) => {
         win.webContents.send('monitor:log', logEntry);
       });
+      broadcastWebEvent('monitor:log', logEntry as unknown as Record<string, unknown>);
       return { success: true };
     }
 

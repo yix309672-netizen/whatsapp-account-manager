@@ -30,9 +30,9 @@ function releaseLaunch(): void {
 const exitCallbacks = new Map<string, Array<() => void>>();
 
 export function onChromeExit(accountId: string, cb: () => void): void {
-  const list = exitCallbacks.get(accountId) || [];
-  list.push(cb);
-  exitCallbacks.set(accountId, list);
+  // 单槽覆盖而不是 push：同一个账号反复登录/重连时，旧回调如果不清理会一直累积
+  // （长跑 24h 的典型内存泄漏），而且旧回调还会去操作已经废弃的会话。
+  exitCallbacks.set(accountId, [cb]);
 }
 
 function findChromeExecutable(): string {
@@ -176,11 +176,28 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
 
   chromeInstances.set(accountId, { process: chromeProcess, port, userDataDir, accountId });
 
+  // spawn 对"可执行文件不存在"是**异步** emit('error')，没有监听者就是 uncaughtException
+  // → Electron 主进程直接崩（表现为"点登录就闪退"）。Chrome 装在非标准路径、
+  // 只装了 Edge、或服务器没装 Chrome 时都会踩到。
+  chromeProcess.once('error', (err) => {
+    logger.error(`Chrome spawn failed for account ${accountId}:`, err);
+    if (chromeInstances.get(accountId)?.process === chromeProcess) {
+      chromeInstances.delete(accountId);
+    }
+  });
+
   logger.info(`Chrome launched for account ${accountId} on port ${port}`);
 
   let wsEndpoint: string;
   try {
     wsEndpoint = await waitForWebSocketEndpoint(port, 20000);
+  } catch (err) {
+    // 启动失败必须把已经 spawn 出来的 Chrome 杀掉：
+    // 它带 detached + unref，不杀就会变成孤儿进程常驻（而且 map 里的句柄会被下次 launch 覆盖，
+    // 从此再也没人管得到它，只能等下次冷启动的 cleanupStaleChrome 兜底）。
+    logger.error(`Chrome endpoint wait failed for ${accountId}, killing spawned process:`, err);
+    closeChromeForAccount(accountId);
+    throw err;
   } finally {
     releaseLaunch();
   }
@@ -282,6 +299,22 @@ export function isChromeRunning(accountId: string): boolean {
   const instance = chromeInstances.get(accountId);
   if (!instance) return false;
   return isProcessAlive(instance.process);
+}
+
+/**
+ * 杀掉本进程拉起的**所有** Chrome。
+ *
+ * 退出时必须有这个兜底：`whatsapp-web.js` 的 client.destroy() 在 CDP 已断时不会发
+ * Browser.close，而 shutdownAll 又只遍历 sessions —— chromeInstances 里那些没有对应
+ * session 的实例（启动超时泄漏、未成功 startSession 的新实例）就永远关不掉。
+ * 这些进程是 detached + unref，Electron 退出后仍会活着占内存。
+ */
+export function closeAllChrome(): void {
+  const ids = [...chromeInstances.keys()];
+  for (const id of ids) {
+    closeChromeForAccount(id);
+  }
+  if (ids.length > 0) logger.info(`closeAllChrome: killed ${ids.length} Chrome instance(s)`);
 }
 
 export function cleanupStaleChrome(): void {

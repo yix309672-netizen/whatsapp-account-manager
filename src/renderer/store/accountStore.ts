@@ -39,11 +39,21 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   },
 
   addAccount: async (name) => {
+    // 防御 window.api 未注入（浏览器形态异常/初始化顺序问题），否则这里会抛
+    // "Cannot read properties of undefined"，被错误边界兜住也就是一片错误页
+    if (!window.api) {
+      set({ error: 'IPC 未就绪' });
+      return;
+    }
     const account = (await window.api.accounts.create({ name })) as Account;
     set({ accounts: [account, ...get().accounts] });
   },
 
   removeAccount: async (accountId) => {
+    if (!window.api) {
+      set({ error: 'IPC 未就绪' });
+      return;
+    }
     await window.api.accounts.remove(accountId);
     set({ accounts: get().accounts.filter((a) => a.id !== accountId) });
   },

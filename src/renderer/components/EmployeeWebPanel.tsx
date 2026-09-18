@@ -19,8 +19,10 @@ export function EmployeeWebPanel(): React.JSX.Element {
       const rows = await inv('employee:list_mine', {});
       setAccounts(Array.isArray(rows) ? rows : []);
       try {
+        // employee:my_status 现在返回 { employee, accounts }；
+        // 兼容旧结构（纯对象带 username/name），避免与旧后端不匹配时又变空
         const st = await inv('employee:my_status', {});
-        const u = (st && (st.username || st.name)) || '';
+        const u = (st && (st.employee?.name || st.employee?.username || st.username || st.name)) || '';
         if (u) setMe(String(u));
       } catch {}
     } catch (e: any) {

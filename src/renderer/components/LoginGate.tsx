@@ -12,15 +12,20 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
   const [captchaSvg, setCaptchaSvg] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [captchaError, setCaptchaError] = useState('');
 
   const loadCaptcha = async (): Promise<void> => {
+    setCaptchaError('');
     try {
       const c = await fetchCaptcha();
       setCaptchaId(c.id);
       setCaptchaSvg(c.svg);
-    } catch {
+    } catch (err) {
+      // 以前这里静默吞异常：验证码区永远显示"加载中"，用户完全不知道发生了什么
+      // （最常见原因：浏览器禁用本地存储 / 网络或隧道不可达）
       setCaptchaId('');
       setCaptchaSvg('');
+      setCaptchaError((err as Error).message || '验证码加载失败');
     }
   };
 
@@ -147,11 +152,19 @@ export function LoginGate({ children }: { children: React.ReactNode }): React.JS
                   >
                     {captchaSvg ? (
                       <img src={`data:image/svg+xml;utf8,${encodeURIComponent(captchaSvg)}`} alt="验证码" className="h-full w-full object-cover" />
+                    ) : captchaError ? (
+                      <span className="text-xs text-red-700 px-1 leading-tight">加载失败<br />点此重试</span>
                     ) : (
                       <span className="text-xs text-amber-700">加载中…</span>
                     )}
                   </button>
                 </div>
+                {captchaError ? (
+                  <p className="text-xs text-red-400 mt-1">
+                    {captchaError}
+                    <button type="button" onClick={loadCaptcha} className="ml-2 underline text-amber-300">重新加载</button>
+                  </p>
+                ) : null}
               </div>
 
               {error && <p className="text-xs text-red-400 text-center">⚠ {error}</p>}

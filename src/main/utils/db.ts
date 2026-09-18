@@ -442,17 +442,20 @@ function runMigrations(): void {
   }
 }
 
-// 长期运行维护清理：导出文件 7 天、已结束的筛号任务 30 天、活跃度缓存 90 天。
-// 防止磁盘无限增长（导出 CSV、历史任务结果表）。幂等，可反复调用。
-export function maintenanceCleanup(): { exports: number; tasks: number; cache: number; chat: number } {
+// 长期运行维护清理：导出文件 7 天、已结束的筛号任务 30 天、活跃度缓存 90 天、
+// 访客日志 180 天。防止磁盘无限增长（导出 CSV、历史任务结果表、访客打点）。幂等，可反复调用。
+export function maintenanceCleanup(): { exports: number; tasks: number; cache: number; chat: number; visits: number } {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
   let tasks = 0;
   let cache = 0;
   let chat = 0;
+  let visits = 0;
   try { tasks = db.prepare("DELETE FROM scanner_tasks WHERE created_at < ? AND status != 'running'").run(now - 30 * 86400).changes as number; } catch { /* ignore */ }
   try { cache = db.prepare('DELETE FROM presence_cache WHERE checked_at < ?').run(now - 90 * 86400).changes as number; } catch { /* ignore */ }
   try { chat = db.prepare('DELETE FROM chat_messages WHERE created_at < ?').run(now - 90 * 86400).changes as number; } catch { /* ignore */ }
+  // visit_logs 以前从不清理（只增不减，还带 4 个索引）→ 长期运行必然膨胀
+  try { visits = db.prepare('DELETE FROM visit_logs WHERE created_at < ?').run(now - 180 * 86400).changes as number; } catch { /* ignore */ }
   let exports = 0;
   try {
     const dir = join(app.getPath('userData'), 'exports');
@@ -466,8 +469,10 @@ export function maintenanceCleanup(): { exports: number; tasks: number; cache: n
       }
     }
   } catch { /* ignore */ }
-  if (tasks || cache || chat || exports) logger.info(`maintenance: tasks=${tasks} cache=${cache} chat=${chat} exports=${exports}`);
-  return { exports, tasks, cache, chat };
+  if (tasks || cache || chat || exports || visits) {
+    logger.info(`maintenance: tasks=${tasks} cache=${cache} chat=${chat} visits=${visits} exports=${exports}`);
+  }
+  return { exports, tasks, cache, chat, visits };
 }
 
 export function getDb(): Database.Database {
