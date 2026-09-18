@@ -1,12 +1,12 @@
-﻿import { getDb } from '../utils/db';
+import { getDb } from '../utils/db';
 import { app, BrowserWindow } from 'electron';
 import { join } from 'path';
 import { existsSync, readdirSync, rmSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { generateDeviceFingerprint, verifyFingerprint } from '../services/fingerprint';
+import { generateDeviceFingerprint, verifyFingerprint, isLegacyFingerprint } from '../services/fingerprint';
 import { WhatsAppSessionManager } from '../services/WhatsAppSessionManager';
 import { launchChromeForAccount, closeChromeForAccount } from '../services/ChromeLauncher';
-import { hashPassword, verifyPassword, createEmployeeToken, resolveEmployeeToken } from '../services/employeeAuth';
+import { hashPassword, verifyPassword, createEmployeeToken, resolveEmployeeToken, clearEmployeeSessions } from '../services/employeeAuth';
 import { loadRelaySettings, saveRelaySettings, ensureAccessCode, regenerateAccessCode } from '../services/relayConfig';
 import { getRelayInstance } from '../services/RelayClient';
 import { logger } from '../utils/logger';
@@ -199,8 +199,21 @@ function runPublishInBackground(root: string, srcDir: string, target: string): v
 export async function handleCommand(ctx: CommandContext, method: string, params: Record<string, unknown>): Promise<unknown> {
   const db = getDb();
 
-  // Web 直连员工角色：白名单之外的命令一律拒绝
-  if (ctx.employeeId && !ctx.employeeToken && !WEB_EMPLOYEE_ALLOW.has(method)) {
+  // ⚠️ 权限边界修复：员工身份有两种形态 —— Web 直连填 employeeId，中转（relay）只填
+  // employeeToken。以前门禁写作 `ctx.employeeId && !ctx.employeeToken && ...`，
+  // 中转路径 employeeId 为空 → 门禁短路，且下面所有 `if (ctx.employeeId && ...)`
+  // 归属校验也一并跳过，等于持有员工 token 就能调管理命令（员工→管理员提权）。
+  // 现在统一解析身份，并把解析结果写回 ctx，让后续白名单与归属校验真正生效。
+  let empId = ctx.employeeId;
+  if (!empId && ctx.employeeToken) {
+    const resolved = resolveEmployeeToken(ctx.employeeToken);
+    if (!resolved) throw new Error('登录已过期，请重新登录');
+    empId = resolved;
+    ctx = { ...ctx, employeeId: empId };
+  }
+
+  // Web/中转员工角色：白名单之外的命令一律拒绝
+  if (empId && !WEB_EMPLOYEE_ALLOW.has(method)) {
     throw new Error('无权限');
   }
 
@@ -306,7 +319,9 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
         throw new Error('设备指纹不匹配，该账号已绑定其他设备');
       }
 
-      if (!account.machine_fingerprint) {
+      // 没有指纹 → 首次绑定；旧版指纹（含应用版本号）→ 顺手升级为稳定指纹，
+      // 避免"升级一次就再也登不上"。
+      if (!account.machine_fingerprint || isLegacyFingerprint(account.machine_fingerprint)) {
         db.prepare('UPDATE accounts SET machine_fingerprint = ? WHERE id = ?')
           .run(currentFingerprint, accountId);
       }
@@ -545,9 +560,12 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
     case 'employee:delete': {
       const employeeId = params.employeeId as string;
       auditLog({ event: 'employee_delete', detail: `删除员工: ${employeeId}`, employeeId, success: true });
-      // 释放该员工名下的账号
-      db.prepare('UPDATE accounts SET assigned_to = NULL WHERE assigned_to = ?').run(employeeId);
+      // 释放该员工名下的账号。顺带清掉设备指纹与备注：与 unassign 语义保持一致，
+      // 否则账号回池后仍带着"已绑定其他设备"的旧指纹，谁都登不上。
+      db.prepare('UPDATE accounts SET assigned_to = NULL, machine_fingerprint = NULL, remark = NULL WHERE assigned_to = ?').run(employeeId);
       db.prepare('DELETE FROM employees WHERE id = ?').run(employeeId);
+      // 吊销该员工的所有凭证：否则被删除的员工仍能用旧 token（30 天有效）继续操作
+      try { clearEmployeeSessions(employeeId); } catch (err) { logger.warn('clearEmployeeSessions failed:', err); }
       return { success: true };
     }
 
@@ -830,7 +848,7 @@ export async function handleCommand(ctx: CommandContext, method: string, params:
       if (account.machine_fingerprint && !verifyFingerprint(account.machine_fingerprint, currentFingerprint)) {
         throw new Error('设备指纹不匹配，该账号已绑定其他设备');
       }
-      if (!account.machine_fingerprint) {
+      if (!account.machine_fingerprint || isLegacyFingerprint(account.machine_fingerprint)) {
         db.prepare('UPDATE accounts SET machine_fingerprint = ? WHERE id = ?')
           .run(currentFingerprint, accountId);
       }

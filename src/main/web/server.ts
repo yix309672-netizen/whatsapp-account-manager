@@ -275,6 +275,76 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+// ==================== 可信 IP 解析 ====================
+/**
+ * 取客户端 IP。
+ *
+ * ⚠️ 安全修复：以前无条件采信 `cf-connecting-ip` / `x-forwarded-for`。
+ * 服务监听 0.0.0.0 时，攻击者直连端口并自带这两个头，就能让**所有按 IP 分桶的限流**
+ * 与**员工 IP 白名单**失效（每次换一个值 = 无限次尝试）。
+ * 现在只有对端确实是本机/内网反代（Nginx、cloudflared 等）时才采信转发头，
+ * 否则一律使用 TCP 对端地址。
+ */
+function isTrustedProxy(remoteAddress: string | undefined): boolean {
+  if (!remoteAddress) return false;
+  const a = remoteAddress.replace(/^::ffff:/, '');
+  if (a === '127.0.0.1' || a === '::1') return true;
+  if (/^10\./.test(a)) return true;
+  if (/^192\.168\./.test(a)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return true;
+  return false;
+}
+
+function getClientIp(req: IncomingMessage): string {
+  const remote = req.socket?.remoteAddress || '';
+  if (isTrustedProxy(remote)) {
+    const cf = req.headers['cf-connecting-ip'] as string | undefined;
+    if (cf) return cf.trim();
+    const xff = req.headers['x-forwarded-for'] as string | undefined;
+    if (xff) return (xff.split(',')[0] || '').trim();
+  }
+  return remote || 'unknown';
+}
+
+// ==================== 公开配对接口的全局闸门 ====================
+// ⚠️ 安全/稳定性修复：这些状态以前声明在 HTTP 请求回调**内部**，等于每个请求各自
+// 重置一份（pairingConcurrent 每次都是 0、inflight 每次都是空），于是注释里宣称的
+// "全局并发 + 排队 + 同号去重"全部不存在 —— 公开接口可被并发刷出大量 headless Chrome
+// （每个数百 MB）把管理器压垮。现在提升到模块作用域，真正全局生效。
+const PAIRING_MAX_CONCURRENT = 3;   // headless Chrome 很重，3 个并发足够
+const PAIRING_QUEUE_MAX = 20;
+const pairingInflight = new Set<string>();
+let pairingConcurrent = 0;
+const pairingQueue: Array<{ phone: string; resolve: (v: unknown) => void; reject: (e: Error) => void; start: number }> = [];
+
+function processPairingQueue(sessionManager: WhatsAppSessionManager): void {
+  while (pairingQueue.length > 0 && pairingConcurrent < PAIRING_MAX_CONCURRENT) {
+    const job = pairingQueue.shift()!;
+    if (Date.now() - job.start > 25000) {
+      job.reject(new Error('排队超时，请重试'));
+      continue;
+    }
+    pairingConcurrent++;
+    pairingInflight.add(job.phone);
+    handleCommand({ sessionManager }, 'account:request_pairing_with_phone', { phoneNumber: job.phone })
+      .then((r) => job.resolve(r))
+      .catch((e) => job.reject(e))
+      .finally(() => {
+        pairingConcurrent--;
+        pairingInflight.delete(job.phone);
+        processPairingQueue(sessionManager);
+      });
+  }
+}
+
+/** 把一次配对请求放进全局队列，返回其结果 */
+function enqueuePairing(phone: string, sessionManager: WhatsAppSessionManager): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    pairingQueue.push({ phone, resolve, reject, start: Date.now() });
+    processPairingQueue(sessionManager);
+  });
+}
+
 // ==================== Web 服务器 ====================
 
 export interface WebServerOptions {
@@ -416,7 +486,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // Bot 直接拦截（静态资源也拦截，避免爬虫拉取）
     if (isBotUA(ua)) {
-      auditLog({ event: 'bot_block', detail: `Bot拦截: ${ua.slice(0,120)}`, ip: (req.headers['cf-connecting-ip'] as string) || req.socket.remoteAddress || 'unknown', success: false });
+      auditLog({ event: 'bot_block', detail: `Bot拦截: ${ua.slice(0,120)}`, ip: getClientIp(req), success: false });
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: '访问被拒绝' }));
       return;
@@ -453,7 +523,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 登录接口
     if (pathname === '/api/login' && req.method === 'POST') {
-      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const ip = getClientIp(req);
       const key = `web_login:${ip}`;
       const rl = checkRateLimit(key);
       if (!rl.allowed) {
@@ -511,7 +581,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 员工登录接口（Web 直连；验证码 + 频率 + 复用 employee:login 的密码/指纹/IP 校验）
     if (pathname === '/api/employee-login' && req.method === 'POST') {
-      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const ip = getClientIp(req);
       const key = `emp_login:${ip}`;
       const rl = checkRateLimit(key);
       if (!rl.allowed) {
@@ -594,31 +664,13 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     }
 
     // 公开配对接口（hotline 页提交号码 → 触发配对，获取 8 位配对码）
-    // 高并发 100：全局并发 20 + 80 排队 + IP/号码限流 + 重试
-    const pairingInflight = new Set<string>();
-    let pairingConcurrent = 0;
-    const PAIRING_MAX_CONCURRENT = 20;
-    const PAIRING_QUEUE_MAX = 80;
-    const pairingQueue: Array<{ phone: string; ip: string; resolve: (v: unknown) => void; reject: (e: Error) => void; start: number }> = [];
-    function processPairingQueue(): void {
-      while (pairingQueue.length > 0 && pairingConcurrent < PAIRING_MAX_CONCURRENT) {
-        const job = pairingQueue.shift()!;
-        if (Date.now() - job.start > 25000) { job.reject(new Error('排队超时，请重试')); continue; }
-        pairingConcurrent++;
-        pairingInflight.add(job.phone);
-        handleCommand({ sessionManager }, 'account:request_pairing_with_phone', { phoneNumber: job.phone })
-          .then((r) => job.resolve(r))
-          .catch((e) => job.reject(e))
-          .finally(() => { pairingConcurrent--; pairingInflight.delete(job.phone); processPairingQueue(); });
-      }
-    }
+    // 并发闸门见模块级 PAIRING_*：全局 3 并发 + 20 排队 + 同号去重
     if (pathname === '/api/request-pairing' && req.method === 'POST') {
-      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
-      const fpPair = (req.headers['x-browser-fp'] as string) || (req.headers['x-fingerprint'] as string) || '';
-      // IP 3次/10s，号码 1次/8s
-      const ipKey = `pair_ip:${ip}`;
-      const ipRl = checkRateLimit(ipKey);
-      if (!ipRl.allowed) {
+      const ip = getClientIp(req);
+      // IP 3次/10s、号码 1次/8s：用固定窗口桶。
+      // 不能用 checkRateLimit —— 它只对"失败"计数（以前这里成功也记失败，
+      // 导致同一号码成功 5 次后反而被封 30 分钟）。
+      if (!chatBucket(`pair_ip:${ip}`, 3, 10000)) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '请求过于频繁，请稍后重试' }));
         return;
@@ -631,11 +683,9 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '缺少手机号' }));
         return;
       }
-      const phoneKey = `pair_phone:${phone}`;
-      const phoneRl = checkRateLimit(phoneKey);
-      if (!phoneRl.allowed) {
+      if (!chatBucket(`pair_phone:${phone}`, 1, 8000)) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: '该号码请求过于频繁，请稍后重试' }));
+        res.end(JSON.stringify({ ok: false, error: '该号码请求过于频繁，请 8 秒后重试' }));
         return;
       }
       // 去重：同一号码并发去重
@@ -644,31 +694,22 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '该号码正在验证中，请稍候' }));
         return;
       }
-      if (pairingConcurrent >= PAIRING_MAX_CONCURRENT) {
+      // 队列满 → 明确拒绝（而不是像以前那样绕过闸门直接执行）
+      if (pairingQueue.length >= PAIRING_QUEUE_MAX) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '系统繁忙，请稍后重试' }));
         return;
       }
-      pairingInflight.add(phone);
-      pairingConcurrent++;
       try {
-        const result = await handleCommand({ sessionManager }, 'account:request_pairing_with_phone', { phoneNumber: phone });
-        // 号码级冷却 8s
-        setTimeout(()=>{},0);
-        recordFailedAttempt(phoneKey);
-        // 成功后清理限流桶避免误伤：用短 TTL 的 check 已足够，此处不额外 clear
+        // 走全局队列：受 PAIRING_MAX_CONCURRENT 限制并参与排队
+        const result = await enqueuePairing(phone, sessionManager);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result));
       } catch (err) {
-        recordFailedAttempt(ipKey);
-        recordFailedAttempt(phoneKey);
         const msg = (err as Error).message || String(err);
-        const code = /频繁|限流|繁忙|429/.test(msg) ? 429 : 500;
+        const code = /频繁|限流|繁忙|429|排队超时/.test(msg) ? 429 : 500;
         res.writeHead(code, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: msg }));
-      } finally {
-        pairingInflight.delete(phone);
-        pairingConcurrent--;
       }
       return;
     }
@@ -698,7 +739,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 客服聊天：用户发送消息（公开接口，自带频率桶限流：单键10条/分，单IP 30条/分）
     if (pathname === '/api/chat-send' && req.method === 'POST') {
-      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const ip = getClientIp(req);
       if (!chatBucket(`chat_ip:${ip}`, 30, 60000)) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '发送过于频繁，请稍后再试' }));
@@ -771,7 +812,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 中转状态（H5 状态灯用，公开接口；仅返回连通性，不泄露 code/url；单IP 60次/分）
     if (pathname === '/api/relay-status' && req.method === 'GET') {
-      const ip = (req.headers['cf-connecting-ip'] as string) || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || 'unknown';
+      const ip = getClientIp(req);
       if (!chatBucket(`relay_status:${ip}`, 60, 60000)) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '请求过于频繁' }));
@@ -861,7 +902,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage, token: string, sess?: WebSession | null) => {
-    const ip = (req.headers['cf-connecting-ip'] as string) || req.socket.remoteAddress || '';
+    const ip = getClientIp(req);
     const country = (req.headers['cf-ipcountry'] as string) || '';
     const ua = (req.headers['user-agent'] as string) || '';
     const employeeMode = new URL(req.url || '/', 'http://localhost').searchParams.get('employee') === '1';
