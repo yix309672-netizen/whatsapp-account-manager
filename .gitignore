@@ -67,3 +67,6 @@ package-lock.json
 
 # Wrangler local state
 .wrangler/
+
+# Cloudflare API 凭据（绝不要提交）：第一行 token，第二行 account id（可选）
+.cf-token
