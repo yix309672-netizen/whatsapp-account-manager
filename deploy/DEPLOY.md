@@ -188,14 +188,82 @@ tail -f /var/lib/waam/logs/app-$(date +%F).log     # 应用日志（更全）
 systemctl disable --now waam    # 停用
 ```
 
-更新到最新代码：
+### 6.1 巡检：一条命令看"掉没掉线"
 
 ```bash
+bash deploy/healthcheck.sh                    # 默认查 https://guanli.whatspph.com
+bash deploy/healthcheck.sh 你的域名
+```
+
+它会依次检查：两个 systemd 服务的状态/自启/重启次数 → 进程运行时长（判断是否中途重启过）→
+本机 9527 → 外网 HTTPS → 真实登录 + WebSocket 6 条命令 → 内存/磁盘/Chrome 数 → 运行期错误行。
+最后给出「通过 N 项 / 失败 N 项」和结论，退出码 = 失败项数（可挂 crontab 告警）。
+
+想做登录自检，先放一份凭据（600 权限，别写进仓库）：
+
+```bash
+printf 'xiaoyi 你的密码' > /opt/waam/health-cred
+chmod 600 /opt/waam/health-cred
+```
+
+挂到 crontab 每 10 分钟巡检一次、失败写日志：
+
+```bash
+echo '*/10 * * * * bash /opt/waam/app/deploy/healthcheck.sh >> /var/log/waam-health.log 2>&1' | crontab -
+```
+
+### 6.2 24 小时常驻的关键设置（都已配好）
+
+| 设置 | 值 | 为什么 |
+|---|---|---|
+| `Restart=always` + `RestartSec=5` | 已配 | 进程挂掉 5 秒内自动拉起 |
+| `StartLimitIntervalSec=0` | 已配 | **systemd 默认 10 秒内崩 5 次就永久放弃拉起**；无人值守服务必须关掉这个限制 |
+| `systemctl enable` | 已配 | 服务器重启后自动启动 |
+| 登录态落盘 | 已配 | token 存 `userData/web-sessions.json`，有效期 7 天，重启不用重新登录 |
+| `WAAM_ANTIDEBUG=0` | 已配 | 免掉每 5 秒一次的反调试探测（Windows 版会 spawn powershell，服务器上纯浪费） |
+| 控制台 EPIPE 兜底 | 已配 | stdout 管道断了也不会把请求卡死（见 7.1 第 4 条） |
+| 会话健康检查 | 代码内置 | 每 30 秒探活，掉线按 3s×2ⁿ 退避重连，最多 5 次 |
+| 磁盘维护 | 代码内置 | 每 6 小时清理：导出文件 7 天、结束的筛号任务 30 天、活跃度缓存 90 天 |
+
+### 6.3 更新代码时的正确顺序（重要）
+
+`npm install` / `npm rebuild` 会**覆盖** `node_modules/better-sqlite3/build/Release/*.node`，
+而正在运行的进程还映射着旧文件 —— 实测会直接把进程打成段错误（`status=139`）。
+所以升级必须**先停服务**：
+
+```bash
+systemctl stop waam                 # ← 必须先停，别在运行中重建原生模块
 cd /opt/waam/app
 git pull
 npm install --no-audit --no-fund
+npm_config_runtime=electron npm_config_target=30.5.1 \
+  npm_config_disturl=https://electronjs.org/headers \
+  npm rebuild better-sqlite3 --foreground-scripts
 npx electron-vite build
-systemctl restart waam
+systemctl start waam
+bash deploy/healthcheck.sh          # 确认起来了
+```
+
+### 6.4 已知容量边界
+
+- **开机自动恢复会话上限 10 个账号**（`src/main/index.ts:95` 的 `system:auto_restore limit:10`，
+  每 12 秒拉起一个）。账号多于 10 个时，重启后只有前 10 个自动上线，其余要手动点登录。
+- 每个已登录账号常驻一个 Chrome，约 300–500MB。4GB 内存的机器建议**常驻不超过 5–6 个账号**，
+  否则会 OOM 被内核杀（表现出来就是服务反复重启）。
+- 单个浏览器会话 token 有效期 7 天，到期需重新登录。
+
+更新到最新代码：
+
+```bash
+systemctl stop waam                 # 先停！运行中重建原生模块会段错误（见 6.3）
+cd /opt/waam/app
+git pull
+npm install --no-audit --no-fund
+npm_config_runtime=electron npm_config_target=30.5.1 \
+  npm_config_disturl=https://electronjs.org/headers \
+  npm rebuild better-sqlite3 --foreground-scripts
+npx electron-vite build
+systemctl start waam
 ```
 
 备份（数据库 + 会话）：

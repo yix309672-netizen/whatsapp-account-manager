@@ -3,6 +3,9 @@ Description=WhatsApp Account Manager (Web)
 Documentation=file:///opt/waam/app/deploy/DEPLOY.md
 After=network-online.target
 Wants=network-online.target
+# 关键：systemd 默认 10 秒内崩 5 次就判定"启动失败"并彻底放弃拉起（服务永久躺平）。
+# 无人值守的 7x24 服务必须关掉这个频率限制，宁可一直重试也不要停摆。
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
