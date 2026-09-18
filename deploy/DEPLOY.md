@@ -10,7 +10,7 @@
 | 角色 | 说明 |
 |---|---|
 | 管理器（本仓库） | Electron 主进程常驻，内置 HTTP + WebSocket 服务（`src/main/web/server.ts`），浏览器操作全部管理功能 |
-| 登录用户名 | 固定 **小易**（`src/main/utils/db.ts` 首次建库时写入） |
+| 登录用户名 | 默认 **xiaoyi**（首次建库时写入 `admin_users`，可用 `WAAM_ADMIN_USER` 改；库里已有账号后改环境变量无效，需直接改库或走改密码接口） |
 | 登录密码 | 首次启动时取环境变量 `WAAM_ADMIN_PASSWORD`，没有就随机生成写入 `userData/web-admin-password.txt` |
 | 数据目录 | 数据库 `accounts.db`、Chrome 配置、WhatsApp 会话、日志、导出文件都在 Electron 的 `userData` 目录 |
 | Chrome | 每个账号一个独立 Chrome 实例（`ChromeLauncher.ts`），**服务器必须装 Chrome**，浏览器本身是 headless 跑的 |
@@ -55,7 +55,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9527/     # 期望 200
 
 - [ ] 登录页出现，带图形验证码
 - [ ] 错密码被拒（连续 5 次会封 30 分钟，这是设计如此）
-- [ ] 用「小易 + 你设的密码」进入管理器
+- [ ] 用「xiaoyi + 你设的密码」进入管理器
 - [ ] 账号列表能加载（空列表也正常）
 - [ ] 新建账号 → 登录 → 出二维码/配对码
 - [ ] `systemctl restart waam` 后无需重新登录（登录态落盘 7 天）
@@ -173,6 +173,7 @@ API Token，可以完全用 API 建隧道，不用点浏览器：
 |---|---|---|
 | `WAAM_WEB_PORT` | `9527` | Web 后台端口 |
 | `WAAM_WEB_HOST` | `0.0.0.0` | 监听地址，只走反代时设 `127.0.0.1` |
+| `WAAM_ADMIN_USER` | `xiaoyi` | 首次建库时的管理员用户名 |
 | `WAAM_ADMIN_PASSWORD` | 空 | 首次建库时的管理员密码；库里已有账号后改这个**不会**改密码，要改走后台改密码接口 |
 | `WAAM_ANTIDEBUG` | 开 | `0` 关闭反调试轮询（服务器建议关，省掉每 5 秒一次进程探测） |
 | `WAAM_NO_CONSOLE` | 开 | `1` 完全不写控制台输出（日志仍写文件） |

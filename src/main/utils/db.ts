@@ -398,12 +398,13 @@ function runMigrations(): void {
   `);
 
   // 初始化默认管理员账号（仅当 admin_users 为空时）
+  // 用户名：环境变量 WAAM_ADMIN_USER，默认 xiaoyi。
   // 密码来源（按优先级，绝不在仓库里放明文密码）：
   // 1) 环境变量 WAAM_ADMIN_PASSWORD；2) userData 下 web-admin-password.txt（已 gitignore）；
   // 3) 都没有则随机生成并写入该文件。密码只写本地文件，日志里只给文件路径。
   const adminCount = (db.prepare('SELECT COUNT(*) c FROM admin_users').get() as { c: number }).c;
   if (adminCount === 0) {
-    const username = '小易';
+    const username = String(process.env.WAAM_ADMIN_USER || '').trim() || 'xiaoyi';
     const { randomBytes, createHash } = require('crypto');
     const { join } = require('path');
     const { existsSync, readFileSync, writeFileSync } = require('fs');
@@ -423,7 +424,7 @@ function runMigrations(): void {
     try {
       db.prepare('INSERT INTO admin_users (id, username, password_hash, salt) VALUES (?, ?, ?, ?)')
         .run(id, username, password_hash, salt);
-      logger.info(`Seeded default admin user: 小易（初始密码见环境变量 WAAM_ADMIN_PASSWORD 或本地文件 ${pwdFile}）`);
+      logger.info(`Seeded default admin user: ${username}（初始密码见环境变量 WAAM_ADMIN_PASSWORD 或本地文件 ${pwdFile}）`);
     } catch (e) {
       logger.warn('Seed admin_users failed:', e);
     }

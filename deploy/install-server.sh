@@ -28,6 +28,7 @@ NODE_VER="${NODE_VER:-20.11.1}"
 DATA_DIR="${DATA_DIR:-/var/lib/waam}"
 ELECTRON_VER="${ELECTRON_VER:-30.5.1}"
 TUNNEL="${TUNNEL:-0}"
+ADMIN_USER="${WAAM_ADMIN_USER:-xiaoyi}"
 
 log()  { printf '\033[32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*"; }
@@ -113,6 +114,7 @@ mkdir -p "$DATA_DIR"
 {
   echo "WAAM_WEB_PORT=${PORT}"
   echo "WAAM_WEB_HOST=0.0.0.0"
+  echo "WAAM_ADMIN_USER=${ADMIN_USER}"
   echo "WAAM_ANTIDEBUG=0"
   echo "WAAM_NO_CONSOLE=0"
   echo "WAAM_CHROME_NO_SANDBOX=1"
@@ -199,12 +201,12 @@ cat <<EOF
 ============================================================
  deployed
    local URL    http://127.0.0.1:${PORT}
-   admin user   小易
+   admin user   ${ADMIN_USER}
    admin pass   $( [[ -n "$WAAM_ADMIN_PASSWORD" ]] && echo "the one you supplied (also in /etc/waam.env)" || echo "see ${DATA_DIR}/web-admin-password.txt" )
    data dir     ${DATA_DIR}
    service      systemctl status|restart|stop waam
    logs         journalctl -u waam -f
  self check
-   node deploy/selfcheck.mjs http://127.0.0.1:${PORT} 小易 <password>
+   node deploy/selfcheck.mjs http://127.0.0.1:${PORT} ${ADMIN_USER} <password>
 ============================================================
 EOF
