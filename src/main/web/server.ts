@@ -6,7 +6,7 @@ function getElectronUserData(): string {
   return electronApp.getPath('userData');
 }
 import { WebSocketServer, WebSocket } from 'ws';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { join, extname, dirname, basename } from 'path';
 import { randomBytes, createHash } from 'crypto';
 import { handleCommand, CommandContext } from '../commands';
@@ -173,8 +173,15 @@ function changeAdminPassword(username: string, oldPwd: string, newPwd: string): 
   const newSalt = randomBytes(16).toString('hex');
   const newHash = hashPassword(newPwd, newSalt);
   db.prepare('UPDATE admin_users SET salt = ?, password_hash = ? WHERE username = ?').run(newSalt, newHash, String(username).trim());
-  // 改密码后吊销所有 token
+  // 改密码后吊销所有 token，并且**必须落盘**：loadSessions() 会在下次启动时把
+  // web-sessions.json 里的 token 读回内存，不落盘的话旧 token 重启后就会"复活"。
   for (const [t] of sessions) sessions.delete(t);
+  saveSessions();
+  // 同时断开所有在线连接：已吊销的会话不该继续拥有全权命令能力
+  for (const c of [...clients]) {
+    try { c.ws.close(); } catch { /* ignore */ }
+    clients.delete(c);
+  }
   return true;
 }
 
@@ -195,9 +202,25 @@ const MIME: Record<string, string> = {
 };
 
 function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string): void {
-  const url = new URL(req.url || '/', 'http://localhost');
-  let pathname = decodeURIComponent(url.pathname);
+  // decodeURIComponent 对畸形编码（/%、/%zz、/%E0%A4%A）会抛 URIError；
+  // 以前没兜住 → 异常逃出 async handler → 请求永久挂死。这里回 400。
+  let url: URL;
+  let pathname: string;
+  try {
+    url = new URL(req.url || '/', 'http://localhost');
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    res.writeHead(400);
+    res.end('Bad Request');
+    return;
+  }
   if (pathname === '/' || pathname === '') pathname = '/index.html';
+  // 未知 /api/* 不要回退成 index.html（会让前端拿到 HTML 却按 JSON 解析，报错难排查）
+  if (pathname.startsWith('/api/')) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'Not Found' }));
+    return;
+  }
   // 防目录穿越
   if (pathname.includes('..')) {
     res.writeHead(403);
@@ -205,14 +228,23 @@ function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string
     return;
   }
   const filePath = join(staticDir, pathname);
-  if (!existsSync(filePath)) {
+  // existsSync 对目录也返回 true，直接 readFileSync 会抛 EISDIR（以前同样挂死请求）
+  let isFile = false;
+  try {
+    isFile = existsSync(filePath) && statSync(filePath).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) {
     // SPA fallback：非文件路径回退到 index.html
     const fallback = join(staticDir, 'index.html');
-    if (existsSync(fallback)) {
-      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache, must-revalidate' });
-      res.end(readFileSync(fallback));
-      return;
-    }
+    try {
+      if (existsSync(fallback)) {
+        res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache, must-revalidate' });
+        res.end(readFileSync(fallback));
+        return;
+      }
+    } catch { /* 落到 404 */ }
     res.writeHead(404);
     res.end('Not Found');
     return;
@@ -223,8 +255,15 @@ function sendStatic(req: IncomingMessage, res: ServerResponse, staticDir: string
   const cache = isHtml
     ? 'no-cache, must-revalidate'
     : (/assets[\\/]/.test(filePath) ? 'public, max-age=31536000, immutable' : 'public, max-age=3600');
-  res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cache });
-  res.end(readFileSync(filePath));
+  try {
+    const body = readFileSync(filePath);
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cache });
+    res.end(body);
+  } catch (err) {
+    logger.warn(`sendStatic failed for ${pathname}:`, err);
+    res.writeHead(500);
+    res.end('Internal Error');
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -248,18 +287,72 @@ export interface WebServerOptions {
 
 let httpServer: Server | null = null;
 let wss: WebSocketServer | null = null;
-const clients = new Set<WebSocket>();
+
+/**
+ * 已订阅事件的 WebSocket 连接。
+ *
+ * ⚠️ 安全修复：以前这里是 `Set<WebSocket>`，并且在 upgrade 后**无条件** add ——
+ * 而 `/ws?employee=1` 是免 token 放行的，于是任何人只要连上来（不发任何命令）
+ * 就能收到所有账号的 account:qr / account:pairing_code / account:ready 广播。
+ * 二维码/配对码本身就是可用来接管 WhatsApp 会话的凭据，等于零凭据泄露。
+ * 现在改为：只有**已鉴权**的连接才登记，并且记录角色与归属，员工只能收到自己账号的事件。
+ */
+interface SubscribedClient {
+  ws: WebSocket;
+  role: 'admin' | 'employee';
+  employeeId?: string;
+  token: string;
+}
+const clients = new Set<SubscribedClient>();
+
+function sendToClient(c: SubscribedClient, payload: string): void {
+  if (c.ws.readyState === WebSocket.OPEN) {
+    try { c.ws.send(payload); } catch { /* 连接已坏，交给 close 事件清理 */ }
+  }
+}
+
+/** 账号是否属于该员工（用于事件定向投递） */
+function accountBelongsToEmployee(accountId: string, employeeId: string): boolean {
+  try {
+    const row = getDb()
+      .prepare('SELECT assigned_to FROM accounts WHERE id = ?')
+      .get(accountId) as { assigned_to: string | null } | undefined;
+    return !!row && row.assigned_to === employeeId;
+  } catch {
+    return false;
+  }
+}
 
 export function broadcastWebEvent(channel: string, data: Record<string, unknown>): void {
   const payload = JSON.stringify({ type: 'event', channel, data });
-  for (const ws of clients) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
+  const accountId = typeof data?.accountId === 'string' ? data.accountId : '';
+  for (const c of clients) {
+    // 管理员看全部；员工只能看分配给自己的账号事件，避免越权拿到别人的二维码
+    if (c.role !== 'admin') {
+      if (!accountId || !c.employeeId) continue;
+      if (!accountBelongsToEmployee(accountId, c.employeeId)) continue;
+    }
+    sendToClient(c, payload);
+  }
+}
+
+/** 吊销某个员工的在线订阅（删除员工/重置绑定后调用） */
+export function revokeEmployeeSessions(employeeId: string): void {
+  for (const c of [...clients]) {
+    if (c.role === 'employee' && c.employeeId === employeeId) {
+      try { c.ws.close(); } catch { /* ignore */ }
+      clients.delete(c);
     }
   }
 }
 
 export function stopWebServer(): void {
+  // 主动断开所有已建立的连接：wss.close() 不会关闭已建立的长连接，
+  // 否则"停服"后旧连接仍能继续发命令。
+  for (const c of [...clients]) {
+    try { c.ws.terminate(); } catch { /* ignore */ }
+  }
+  clients.clear();
   if (wss) {
     wss.close();
     wss = null;
@@ -268,7 +361,6 @@ export function stopWebServer(): void {
     httpServer.close();
     httpServer = null;
   }
-  clients.clear();
 }
 
 export async function startWebServer(opts: WebServerOptions): Promise<void> {
@@ -280,8 +372,31 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
   const isBotUA = (ua: string): boolean => BOT_UA_RE.test(ua || '');
   const isValidFp = (fp: string): boolean => /^[a-f0-9]{64}$/i.test(fp || '');
 
-  httpServer = createServer(async (req, res) => {
-    const url = new URL(req.url || '/', 'http://localhost');
+  httpServer = createServer((req, res) => {
+    // 最外层兜底：以前的 handler 是裸 async，一旦抛错就变成未处理的 rejection，
+    // 客户端**永远收不到响应**（实测：畸形请求目标如 `GET http://[::1` 会让请求挂死 60s+）。
+    // 这里统一 try/catch 并保证一定有响应。
+    handleHttpRequest(req, res, staticDir).catch((err) => {
+      logger.error('web handler error:', err);
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+        }
+        res.end(JSON.stringify({ ok: false, error: '服务内部错误' }));
+      } catch { /* 响应已不可写 */ }
+    });
+  });
+
+  async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, staticDir: string): Promise<void> {
+    // 畸形请求目标（如 "http://[::1"）会让 new URL 抛 Invalid URL —— 必须回 400 而不是挂死
+    let url: URL;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Bad Request' }));
+      return;
+    }
     const pathname = url.pathname;
     const ua = (req.headers['user-agent'] as string) || '';
     const fp = (req.headers['x-browser-fp'] as string) || (req.headers['x-fingerprint'] as string) || '';
@@ -711,12 +826,19 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
 
     // 其余请求走静态文件
     sendStatic(req, res, staticDir);
-  });
+  }
 
   wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url || '/', 'http://localhost');
+    let url: URL;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     const token = url.searchParams.get('token') || '';
     const fp = url.searchParams.get('fp') || url.searchParams.get('fingerprint') || '';
     const ua = (req.headers['user-agent'] as string) || '';
@@ -739,7 +861,6 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage, token: string, sess?: WebSession | null) => {
-    clients.add(ws);
     const ip = (req.headers['cf-connecting-ip'] as string) || req.socket.remoteAddress || '';
     const country = (req.headers['cf-ipcountry'] as string) || '';
     const ua = (req.headers['user-agent'] as string) || '';
@@ -747,6 +868,19 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     // 员工模式连接：登录前为 pending，登录成功后绑定 employeeId
     let connEmployeeId = sess?.role === 'employee' ? sess.employeeId : undefined;
     let pendingEmployeeAuth = employeeMode && !connEmployeeId;
+
+    // ⚠️ 关键：**不在这里登记广播订阅**。
+    // 以前这里是 clients.add(ws)，而 /ws?employee=1 免 token 放行，导致任何人
+    // 连上来就能收到所有账号的二维码/配对码广播。现在只有鉴权完成的连接才登记：
+    //   - 管理员：握手时 token 有效，直接登记；
+    //   - 员工：未鉴权时先不入集合，employee:login 成功后才登记（并绑定 employeeId）。
+    const subscription: SubscribedClient = {
+      ws,
+      role: sess?.role === 'employee' ? 'employee' : 'admin',
+      employeeId: connEmployeeId,
+      token
+    };
+    if (!pendingEmployeeAuth) clients.add(subscription);
 
     ws.on('message', async (raw: Buffer | string) => {
       let msg: { id?: string; method?: string; params?: Record<string, unknown> };
@@ -770,6 +904,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       // 注销
       if (method === 'logout') {
         revokeToken(token);
+        clients.delete(subscription);
         ws.send(JSON.stringify({ id, ok: true, data: { loggedOut: true } }));
         try { ws.close(); } catch { /* ignore */ }
         return;
@@ -778,6 +913,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       // 员工模式未登录：只放行 employee:login，其余一律拒绝
       if (pendingEmployeeAuth && method !== 'employee:login') {
         ws.send(JSON.stringify({ id, ok: false, error: '请先登录' }));
+        return;
+      }
+
+      // 管理员连接：每条命令前复查 token 是否仍有效（改密码/吊销后立即失效，
+      // 而不是让已建立的连接继续拥有全部权限直到对方主动断开）
+      if (!pendingEmployeeAuth && subscription.role === 'admin' && !isValidToken(token)) {
+        clients.delete(subscription);
+        ws.send(JSON.stringify({ id, ok: false, error: '登录已失效，请重新登录' }));
+        try { ws.close(); } catch { /* ignore */ }
         return;
       }
 
@@ -792,7 +936,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         const result = await handleCommand(ctx, method, params);
         if (pendingEmployeeAuth && method === 'employee:login') {
           const empId = (result as { employee?: { id?: string } })?.employee?.id;
-          if (empId) { connEmployeeId = empId; pendingEmployeeAuth = false; }
+          if (empId) {
+            connEmployeeId = empId;
+            pendingEmployeeAuth = false;
+            // 员工登录成功后才登记订阅，且只订阅自己账号的事件
+            subscription.role = 'employee';
+            subscription.employeeId = empId;
+            clients.add(subscription);
+          }
         }
         ws.send(JSON.stringify({ id, ok: true, data: result }));
       } catch (err) {
@@ -802,7 +953,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     });
 
     ws.on('close', () => {
-      clients.delete(ws);
+      clients.delete(subscription);
     });
   });
 

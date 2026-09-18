@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { relayPushEvent } from './RelayClient';
 import { getAccountOwner, getEmployeeClientIdForAccount } from '../commands';
-import { closeBlankTabs } from './ChromeLauncher';
+import { closeBlankTabs, closeChromeForAccount, launchChromeForAccount } from './ChromeLauncher';
 // 注意：必须静态导入。动态 require('../web/server') 在打包后相对路径不存在，
 // esbuild 会原样保留导致运行时 Cannot find module（被 try/catch 吞掉，Web 推送悄悄失效）
 import { broadcastWebEvent } from '../web/server';
@@ -52,6 +52,22 @@ export class WhatsAppSessionManager {
    * 抽成方法是为了支持"初始化失败后换一个全新 client 重试"——
    * 失败的 client 内部 page 已半死，复用同一个实例重试往往还是失败。
    */
+  /**
+   * 判断会话底层的 Chrome 是否还活着。
+   * puppeteer.connect 模式下，pupBrowser.isConnected() 在 Chrome 进程消失后返回 false;
+   * 这一条是"用户关掉浏览器窗口/进程被杀"后能自动恢复的关键，仅看内存里的 status
+   * 会一直以为会话是 ready。
+   */
+  private isClientAlive(client: Client): boolean {
+    try {
+      const browser = (client as unknown as { pupBrowser?: { isConnected?: () => boolean } }).pupBrowser;
+      if (!browser || typeof browser.isConnected !== 'function') return true; // 拿不到就按存活处理，避免误杀
+      return browser.isConnected() === true;
+    } catch {
+      return false;
+    }
+  }
+
   private buildClient(accountId: string, chromeWsEndpoint: string, options?: StartSessionOptions): Client {
     const headless = options?.headless ?? false;
     return new Client({
@@ -80,15 +96,22 @@ export class WhatsAppSessionManager {
   async startSession(accountId: string, chromeWsEndpoint: string, _options?: StartSessionOptions): Promise<Client> {
     if (this.sessions.has(accountId)) {
       const existing = this.sessions.get(accountId)!;
-      if (existing.status === 'ready') return existing.client;
+      if (existing.status === 'ready' && this.isClientAlive(existing.client)) return existing.client;
+      // 状态是 ready 但底层 Chrome 已经没了（用户关窗口/进程被杀的常见情形）：
+      // 必须当作死会话处理，否则会直接返回一个已断开的 client，前端点登录毫无反应。
+      if (existing.status === 'ready') {
+        logger.warn(`Session for ${accountId} is marked ready but its browser is gone, restarting it`);
+      }
       await this.stopSession(accountId);
     }
 
     // Web 模式强制清除旧认证数据，确保走配对流程（触发手机通知）
+    // 注意目录名是 LocalAuth 实际使用的小写 `session-<clientId>`（大写 Session- 在
+    // Linux/macOS 上大小写敏感，existsSync 恒为 false，会让"强制重新配对"静默失效）。
     if (_options?.phoneNumber) {
       try {
         const fs = require('fs');
-        const authDir = join(this.sessionDataPath, `Session-${accountId}`);
+        const authDir = join(this.sessionDataPath, `session-${accountId}`);
         if (fs.existsSync(authDir)) {
           fs.rmSync(authDir, { recursive: true, force: true });
           logger.info(`Cleared old auth data for ${accountId} to force pairing flow`);
@@ -121,42 +144,65 @@ export class WhatsAppSessionManager {
 
     this.attachClientHandlers(sessionInfo, sweep);
 
-    // 延时兜底清扫：页面创建有延迟的话，事件时点的清扫可能扑空，5s/15s 后再扫两遍
+    // 延时兜底清扫：页面创建有延迟的话，事件时点的清扫可能扑空，5s/15s 后再扫两遍。
+    // 句柄记下来，重试换会话时要清掉，否则旧定时器会去关新会话的页面。
+    const sweepTimers: Array<ReturnType<typeof setTimeout>> = [];
     for (const ms of [5000, 15000]) {
-      setTimeout(() => {
-        const s = this.sessions.get(accountId);
-        if (!s || !s.chromePort) return;
-        if (s.status === 'disconnected' || s.status === 'failed') return;
-        closeBlankTabs(s.chromePort)
+      sweepTimers.push(setTimeout(() => {
+        // 只对"当前仍是这次建立的会话"生效，避免误伤重启后的新会话
+        if (this.sessions.get(accountId) !== sessionInfo) return;
+        if (!sessionInfo.chromePort) return;
+        if (sessionInfo.status === 'disconnected' || sessionInfo.status === 'failed') return;
+        closeBlankTabs(sessionInfo.chromePort)
           .then((n) => { if (n > 0) logger.info(`delayed sweep for ${accountId} closed ${n} tab(s) after ${ms}ms`); })
           .catch(() => {});
-      }, ms);
+      }, ms));
     }
+    const clearSweepTimers = (): void => { for (const t of sweepTimers) clearTimeout(t); sweepTimers.length = 0; };
 
-    // 初始化重试：实测第一次并发拉起 6 个账号时，偶发 wwebjs 内部竞态
-    // （Cannot read properties of null (reading 'info')）导致该账号登录失败。
-    // 失败的 client 内部 page 已半死，所以重试要换一个全新 client —— 实测这件事很关键。
+    // 初始化重试。
+    //
+    // ⚠️ 关键坑（已实测确认）：whatsapp-web.js 的 client.destroy() 在 browserWSEndpoint
+    // （puppeteer.connect）模式下会执行 CDP 的 Browser.close，**把整个 Chrome 进程杀掉**
+    // （实测：logout 后 chrome 进程从 14 个直接归零）。所以重试**不能**复用原来的
+    // chromeWsEndpoint —— 那是在连一个已经死掉的端点，必然失败，会把"偶发失败"变成"必然失败"。
+    // 正确做法：destroy 之后重新 launchChromeForAccount 拿新的 wsEndpoint/port，再建新 client。
     const MAX_TRY = 3;
     let lastErr: unknown;
+    let wsEndpoint = chromeWsEndpoint;
     for (let attempt = 1; attempt <= MAX_TRY; attempt++) {
       try {
         await client.initialize();
-        this.setupReconnect(accountId, chromeWsEndpoint, _options);
+        this.setupReconnect(accountId, wsEndpoint, _options);
         return client;
       } catch (err) {
         lastErr = err;
         const msg = (err as Error)?.message || String(err);
         logger.warn(`Session init failed for ${accountId} (attempt ${attempt}/${MAX_TRY}): ${msg}`);
         if (attempt === MAX_TRY) break;
-        // 销毁半死的 client，换新实例重来
+        clearSweepTimers();
+        // 1) 销毁半死的 client（这一步会把 Chrome 一起关掉）
         try { await client.destroy(); } catch { /* 已经坏了，忽略 */ }
+        // 2) 确保进程真的没了，并清掉 launcher 里的死句柄
+        closeChromeForAccount(accountId);
         await new Promise((r) => setTimeout(r, 1500 * attempt));
+        // 3) 重新拉起一个全新的 Chrome，换成新端点
+        try {
+          const relaunched = await launchChromeForAccount(accountId, { headless: _options?.headless });
+          wsEndpoint = relaunched.wsEndpoint;
+          sessionInfo.chromePort = relaunched.port;
+        } catch (launchErr) {
+          logger.error(`Relaunch Chrome failed for ${accountId} on attempt ${attempt}:`, launchErr);
+          lastErr = launchErr;
+          break;
+        }
         sessionInfo.status = 'initializing';
-        client = this.buildClient(accountId, chromeWsEndpoint, _options);
+        client = this.buildClient(accountId, wsEndpoint, _options);
         sessionInfo.client = client;
         this.attachClientHandlers(sessionInfo, sweep);
       }
     }
+    clearSweepTimers();
     sessionInfo.status = 'failed';
     logger.error(`Session init failed for ${accountId} after ${MAX_TRY} attempts:`, lastErr);
     throw lastErr;
@@ -200,10 +246,11 @@ export class WhatsAppSessionManager {
       sessionInfo.status = 'disconnected';
       this.updateAccountStatus(accountId, 'offline');
       this.emitAccountEvent('account:disconnected', { accountId, reason });
-      // 触发自动重连（如果存在重连参数）
+      // 触发自动重连（如果存在重连参数）。
+      // 注意：这里**不能**把 retryCount 清零——否则"连上就断"的循环会让退避上限
+      // （MAX_RECONNECT_RETRIES）永远不成立，变成无限重连。清零只应在重连成功时做。
       if (sessionInfo.reconnectInfo) {
-        logger.info(`Session ${accountId} disconnected (${reason}), scheduling auto-reconnect`);
-        sessionInfo.reconnectInfo.retryCount = 0;
+        logger.info(`Session ${accountId} disconnected (${reason}), scheduling auto-reconnect (retry ${sessionInfo.reconnectInfo.retryCount})`);
         this.triggerReconnect(accountId);
       }
     });

@@ -326,6 +326,11 @@ function runMigrations(): void {
     logger.info('Migrated employees table: added machine_fingerprint column');
   }
 
+  // ⚠️ 建表必须包含后续迁移新增的所有列。
+  // 历史 bug：下面第 266-320 行的 scanner_* 列迁移跑在本建表语句**之前**，全新库首次启动时
+  // ALTER TABLE 因表不存在而失败（只打 WARN），随后这里建出的又是旧结构，
+  // 导致首启期间筛号功能整体报 "no such column: kind / channel / status_msg"。
+  // 把列直接写进建表语句后，新库一次到位，那些迁移语句自然退化为幂等空操作。
   db.exec(`
     CREATE TABLE IF NOT EXISTS scanner_tasks (
       id TEXT PRIMARY KEY,
@@ -336,6 +341,8 @@ function runMigrations(): void {
       valid_count INTEGER NOT NULL DEFAULT 0,
       invalid_count INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending',
+      channel TEXT NOT NULL DEFAULT 'pool',
+      kind TEXT NOT NULL DEFAULT 'register',
       created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
       finished_at INTEGER
     );
@@ -348,6 +355,10 @@ function runMigrations(): void {
       has_avatar INTEGER NOT NULL DEFAULT 0,
       avatar_url TEXT,
       error TEXT,
+      status_msg TEXT,
+      pushname TEXT,
+      active_flag INTEGER NOT NULL DEFAULT -1,
+      checker_id INTEGER NOT NULL DEFAULT -2,
       created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
       FOREIGN KEY(task_id) REFERENCES scanner_tasks(id) ON DELETE CASCADE
     );
