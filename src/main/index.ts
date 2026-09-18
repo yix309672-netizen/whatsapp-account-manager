@@ -134,21 +134,23 @@ app.on('window-all-closed', () => {
  *
  * ⚠️ 修复说明：
  *  1) Electron **不会 await** before-quit 里的 async 处理器。以前直接 `await shutdownAll()`
- *     时主进程可能先退出，导致 `detached + unref` 的 Chrome 全部变成孤儿进程
- *     （实测重启后残留 13 个 Chrome、占用几百 MB）。
+ *     时主进程可能先退出，导致 `detached + unref` 的 Chrome 全部变成孤儿进程。
  *     现在用 preventDefault() 拦住退出，清理完再 app.exit()。
  *  2) shutdownAll 只遍历 sessions；chromeInstances 里那些**没有对应 session** 的 Chrome
  *     （启动超时泄漏、未成功 startSession 的新实例）永远关不掉。这里补 closeAllChrome() 兜底。
  *  3) closeDatabase() 之前从未被调用 → WAL 不 checkpoint，单独拷 accounts.db 会丢最近写入。
+ *  4) ⚠️ 服务化部署下 systemd 发的是 **SIGTERM**，而 before-quit **不会**因信号触发 ——
+ *     实测 `systemctl restart waam` 后 Chrome 仍然残留（27 个）。所以必须同时处理信号。
  */
 let quitting = false;
-app.on('before-quit', (event) => {
-  if (quitting) return;
-  event.preventDefault();
-  quitting = true;
 
-  stopWebServer();
-  cleanupSecurity();
+function gracefulShutdown(reason: string): void {
+  if (quitting) return;
+  quitting = true;
+  logger.info(`Graceful shutdown started (${reason})`);
+
+  try { stopWebServer(); } catch (err) { logger.warn('stopWebServer failed:', err); }
+  try { cleanupSecurity(); } catch (err) { logger.warn('cleanupSecurity failed:', err); }
   // 先同步杀掉所有已知 Chrome（不依赖 CDP 往返，最可靠）
   try { closeAllChrome(); } catch (err) { logger.warn('closeAllChrome failed:', err); }
 
@@ -162,7 +164,27 @@ app.on('before-quit', (event) => {
     .catch((err) => logger.warn('shutdownAll failed:', err))
     .finally(() => {
       clearTimeout(hardExit);
+      // 再兜一次：shutdownAll 可能又新建/遗漏了实例
+      try { closeAllChrome(); } catch { /* ignore */ }
       try { closeDatabase(); } catch (err) { logger.warn('closeDatabase failed:', err); }
       app.exit(0);
     });
+}
+
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  gracefulShutdown('before-quit');
+});
+
+// systemd / docker stop / Ctrl-C 都是发信号，不会走 before-quit
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+  process.on(sig, () => {
+    logger.info(`Received ${sig}`);
+    gracefulShutdown(sig);
+  });
+}
+// 进程即将异常退出时也尽量清一次（同步部分至少能杀掉 Chrome）
+process.on('exit', () => {
+  try { closeAllChrome(); } catch { /* ignore */ }
 });
