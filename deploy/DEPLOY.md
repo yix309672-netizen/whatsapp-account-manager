@@ -118,6 +118,55 @@ systemctl restart cloudflared
 
 访问 `https://guanli.你的域名`（Cloudflare 自带 HTTPS，WebSocket 也会被正常转发）。
 
+### 4.2 用 API Token 建正式隧道（无需浏览器授权）
+
+`cloudflared tunnel login` 需要域名持有者在浏览器点授权。如果你（或运维）手上能拿到
+API Token，可以完全用 API 建隧道，不用点浏览器：
+
+1. Cloudflare 后台 → My Profile → API Tokens → Create Token，权限：
+   - `Account` → `Cloudflare Tunnel` → **Edit**
+   - `Zone` → `DNS` → **Edit**（Zone 选你的域名，如 `whatspph.com`）
+
+2. 拿真实的 **Account ID**：`GET /client/v4/zones/<zone_id>` 里的 `result.account.id`
+   ⚠️ 不要凭 token 前缀猜账号 ID（实测猜错会一路 403，很难看出原因）。
+
+3. 建隧道（注意 `config_src=cloudflare` 表示 ingress 走**远端配置**）：
+   ```bash
+   curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/cfd_tunnel" \
+     -H "Authorization: Bearer $CF_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"name":"waam-server","config_src":"cloudflare"}'
+   # 响应里的 .result.id 是隧道 ID，.result.token 是 cloudflared 用的 token（240 字符）
+   ```
+
+4. 下发 ingress（`connectTimeout` 必须是**数字**，写成 `"30s"` 会报
+   `strconv.ParseInt: parsing "\"30s\"": invalid syntax`）：
+   ```bash
+   curl -s -X PUT "https://api.cloudflare.com/client/v4/accounts/$ACCT/cfd_tunnel/$TID/configurations" \
+     -H "Authorization: Bearer $CF_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"config":{"ingress":[
+           {"hostname":"guanli.whatspph.com","service":"http://127.0.0.1:9527","originRequest":{"connectTimeout":30}},
+           {"service":"http_status:404"}]}}'
+   ```
+
+5. DNS 指向隧道：
+   ```bash
+   # 找到已有记录 id
+   curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=guanli.whatspph.com" \
+     -H "Authorization: Bearer $CF_TOKEN"
+   # 改成 CNAME -> <隧道ID>.cfargotunnel.com，proxied=true
+   ```
+
+6. 服务器上装服务（**不要**再放本地 `config.yml`！）：
+   ```bash
+   cloudflared service install --no-update-service "<240字符token>"
+   systemctl enable --now cloudflared
+   ```
+   ⚠️ 本地 `/etc/cloudflared/config.yml` 里写 `tunnel: <id>` 会和 token 里的隧道冲突，
+   实测会变成边缘报 `error code: 1033`（边缘不知道这个隧道）。用 token 时只保留 token 文件，
+   本地 config 改名备份即可。
+
+7. **配置生效有几秒到几十秒延迟**：刚下发完立刻访问可能还是 `530 / 1033`，等 10–30 秒再试。
+
 ## 5. 环境变量一览（`/etc/waam.env`）
 
 | 变量 | 默认 | 说明 |
@@ -194,6 +243,8 @@ systemctl start waam
 | 账号登录报 `Chrome 调试端点连接超时` | 没装 Chrome，或 root 下缺 `--no-sandbox`：确认 `google-chrome --version` 可用、`WAAM_CHROME_NO_SANDBOX=1` |
 | 服务起来就退出 | `journalctl -u waam -n 50`；常见是 `DISPLAY` 缺失（服务里必须走 `xvfb-run`）或 9527 被占用 |
 | `xvfb-run: 184: 0: not found` | 给 `xvfb-run` 传了 `-s/--server-args`，去掉即可（见 7.1 第 2 条） |
+| 域名访问返回 `530` + `error code: 1033` | 边缘不知道这个隧道。两个常见原因：① 本地 `config.yml` 的 `tunnel:` 和 token 里的隧道冲突（删掉本地 config）；② 刚下发 ingress 配置，等 10–30 秒 |
+| 建隧道 API 一直 403 | Account ID 不对。用 `GET /zones/<zone_id>` 里的 `result.account.id`，别凭 token 猜 |
 | `was compiled against a different Node.js version` | better-sqlite3 的 ABI 不对，按 7.1 第 1 条重建 |
 | 公网打不开但本机能 `curl` 通 | 服务商封了端口，走 Cloudflare Tunnel（见 4.1） |
 | 想换管理员密码 | 管理后台改密码接口（改完所有 token 失效需重登）；或删库重来：停服务 → 删 `/var/lib/waam/database` → 设 `WAAM_ADMIN_PASSWORD` → 启动 |
