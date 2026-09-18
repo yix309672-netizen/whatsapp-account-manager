@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { join } from 'path';
-import { accessSync } from 'fs';
+import { accessSync, existsSync, readdirSync, statSync } from 'fs';
 import { spawn, execFileSync, SpawnOptions } from 'child_process';
 import { getFreePort } from '../utils/port';
 import { logger } from '../utils/logger';
@@ -28,6 +28,14 @@ function releaseLaunch(): void {
 }
 
 const exitCallbacks = new Map<string, Array<() => void>>();
+
+/**
+ * 各账号最近一次"发起启动 Chrome"的时间。
+ * 用于周期性孤儿扫描的宽限期：spawn 之后、startSession 把会话登记进 map 之前，
+ * 有一小段窗口期是查不到会话的，此时绝不能把它当孤儿杀掉。
+ */
+const launchedAt = new Map<string, { at: number }>();
+const LAUNCH_GRACE_MS = 3 * 60 * 1000;
 
 export function onChromeExit(accountId: string, cb: () => void): void {
   // 单槽覆盖而不是 push：同一个账号反复登录/重连时，旧回调如果不清理会一直累积
@@ -124,6 +132,9 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
   const port = await getFreePort();
   const userDataDir = join(app.getPath('userData'), 'chrome-profiles', accountId);
   const chromePath = findChromeExecutable();
+  // 记录启动时间：从 spawn 到 startSession 登记会话之间存在毫秒级间隙，
+  // 周期性扫描若正好落在这段时间会误杀刚起来的 Chrome，用宽限期挡住。
+  launchedAt.set(accountId, { at: Date.now() });
 
   const args = [
     `--remote-debugging-port=${port}`,
@@ -175,6 +186,9 @@ export async function launchChromeForAccount(accountId: string, opts?: { headles
   });
 
   chromeInstances.set(accountId, { process: chromeProcess, port, userDataDir, accountId });
+  // 宽限期用：刚启动的实例即使一时查不到会话也不能被扫描误杀
+  const launched = launchedAt.get(accountId);
+  if (launched) launched.at = Date.now();
 
   // spawn 对"可执行文件不存在"是**异步** emit('error')，没有监听者就是 uncaughtException
   // → Electron 主进程直接崩（表现为"点登录就闪退"）。Chrome 装在非标准路径、
@@ -315,6 +329,119 @@ export function closeAllChrome(): void {
     closeChromeForAccount(id);
   }
   if (ids.length > 0) logger.info(`closeAllChrome: killed ${ids.length} Chrome instance(s)`);
+}
+
+// ==================== 周期性孤儿 Chrome 清理 ====================
+/**
+ * 为什么需要它：
+ *   清理 Chrome 只发生在三个时机 —— 账号退出/删除、cleanupStaleChrome（仅启动时一次）、
+ *   以及退出时的 closeAllChrome。可一旦主进程被**强制结束**（Windows 任务管理器结束任务、
+ *   `Stop-Process -Force`、崩溃、SIGKILL），任何退出钩子都不会执行，
+ *   而 Chrome 是 detached + unref 的，于是全部变成孤儿进程常驻内存。
+ *   实测：本地一次强杀测试实例就留下几十个孤儿 Chrome。
+ *
+ * 做法：每 N 分钟扫一遍 chrome-profiles 目录，凡是
+ *   - 不在本进程的 chromeInstances 里（即不是我们正在管理的实例），且
+ *   - 没有对应的被跟踪会话（sessionManager.isSessionTracked）
+ * 的就按 profile 路径整组杀掉（Chrome 的渲染/GPU 子进程共享同一个 --user-data-dir，
+ * 整组杀掉是安全的）。
+ */
+let staleChromeTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 按 profile 路径匹配并杀掉一组 Chrome 进程（同步，避免阻塞事件循环过久） */
+function killChromeGroupByProfile(profileDir: string): number {
+  try {
+    if (process.platform === 'win32') {
+      const { execFileSync } = require('child_process');
+      // 用 -like 通配而不是 [regex]::Escape：命令行里含反斜杠，正则转义在 PS 里易出岔子
+      const script = [
+        'Get-CimInstance Win32_Process -Filter "name=\'chrome.exe\'"',
+        `| Where-Object { $_.CommandLine -like '*${profileDir}*' }`,
+        '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'
+      ].join(' ');
+      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        encoding: 'utf8',
+        timeout: 15000,
+        windowsHide: true
+      });
+      return 0; // PowerShell 不回传计数，调用方看日志即可
+    }
+    const { execFileSync } = require('child_process');
+    const script = [
+      'ps -eo pid=,args=',
+      `| grep -F '${profileDir}'`,
+      '| grep -v grep',
+      "| awk '{print $1}'",
+      '| xargs -r kill -9 2>/dev/null',
+      '|| true'
+    ].join(' ');
+    execFileSync('/bin/sh', ['-c', script], { encoding: 'utf8', timeout: 15000 });
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 扫一次孤儿 Chrome。
+ * @param isSessionTracked 判断某账号当前是否仍被会话管理器跟踪
+ * @returns 清理掉的 profile 目录数
+ */
+export function sweepOrphanChrome(isSessionTracked: (accountId: string) => boolean): number {
+  const root = join(app.getPath('userData'), 'chrome-profiles');
+  if (!existsSync(root)) return 0;
+
+  let cleaned = 0;
+  for (const accountId of readdirSync(root)) {
+    // 正在管理的实例：交给正常的会话生命周期，绝不在这里动
+    if (chromeInstances.has(accountId)) continue;
+    // 仍有被跟踪的会话（含正在扫码配对的）：不能杀
+    if (isSessionTracked(accountId)) continue;
+    // 刚发起过启动（spawn 与 startSession 之间的窗口期）：宽限期内不动
+    const launched = launchedAt.get(accountId);
+    if (launched && Date.now() - launched.at < LAUNCH_GRACE_MS) continue;
+
+    const profileDir = join(root, accountId);
+    try {
+      if (!statSync(profileDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    logger.warn(`sweepOrphanChrome: ${accountId} 没有活跃会话，清理其残留 Chrome`);
+    killChromeGroupByProfile(profileDir);
+    cleaned++;
+    // profile 目录先留着：可能有账号只是暂时没有会话，下次登录还要用。
+    // 真正的删除时机是 account:delete。
+  }
+  return cleaned;
+}
+
+/** 启动周期性孤儿清理（幂等；可用 WAAM_SWEEP_INTERVAL_MS=0 关闭） */
+export function startOrphanChromeSweep(
+  isSessionTracked: (accountId: string) => boolean,
+  intervalMs = Number(process.env.WAAM_SWEEP_INTERVAL_MS || 5 * 60 * 1000)
+): void {
+  if (staleChromeTimer) return;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    logger.info('Orphan Chrome sweep disabled');
+    return;
+  }
+  staleChromeTimer = setInterval(() => {
+    try {
+      const n = sweepOrphanChrome(isSessionTracked);
+      if (n > 0) logger.info(`Orphan Chrome sweep cleaned ${n} profile group(s)`);
+    } catch (err) {
+      logger.warn('Orphan Chrome sweep failed:', err);
+    }
+  }, intervalMs);
+  logger.info(`Orphan Chrome sweep started (every ${Math.round(intervalMs / 1000)}s)`);
+}
+
+export function stopOrphanChromeSweep(): void {
+  if (staleChromeTimer) {
+    clearInterval(staleChromeTimer);
+    staleChromeTimer = null;
+  }
 }
 
 export function cleanupStaleChrome(): void {

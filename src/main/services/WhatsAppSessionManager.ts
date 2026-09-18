@@ -286,6 +286,15 @@ export class WhatsAppSessionManager {
     return this.sessions.get(accountId)?.client;
   }
 
+  /**
+   * 该账号当前是否有被管理的会话（含正在初始化/等待扫码的）。
+   * 用途：周期性孤儿 Chrome 清理必须用这个宽松判断 —— shutdownAll 只关心
+   * ready/authenticated，但"正在扫码配对"的账号其 Chrome 同样不能被杀。
+   */
+  isSessionTracked(accountId: string): boolean {
+    return this.sessions.has(accountId);
+  }
+
   hasActiveSession(accountId: string): boolean {
     const s = this.sessions.get(accountId);
     return !!s && (s.status === 'ready' || s.status === 'authenticated');

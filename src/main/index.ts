@@ -2,7 +2,7 @@ import { app, ipcMain } from 'electron';
 import { join } from 'path';
 import { initDatabase, maintenanceCleanup, closeDatabase } from './utils/db';
 import { WhatsAppSessionManager } from './services/WhatsAppSessionManager';
-import { cleanupStaleChrome, closeAllChrome } from './services/ChromeLauncher';
+import { cleanupStaleChrome, closeAllChrome, startOrphanChromeSweep, stopOrphanChromeSweep } from './services/ChromeLauncher';
 import { RelayClient, setRelayInstance } from './services/RelayClient';
 import { loadRelaySettings, ensureAccessCode } from './services/relayConfig';
 import { logger } from './utils/logger';
@@ -100,6 +100,11 @@ async function initializeManager(): Promise<void> {
   try { maintenanceCleanup(); } catch (e) { logger.warn('maintenance initial failed:', e); }
   setInterval(() => { try { maintenanceCleanup(); } catch (e) { logger.warn('maintenance failed:', e); } }, 6 * 3600 * 1000);
 
+  // 周期性孤儿 Chrome 清理：主进程被强杀/崩溃时退出钩子不会执行，
+  // detached 的 Chrome 会变成孤儿常驻内存。每 5 分钟扫一次 chrome-profiles，
+  // 把"既不在 chromeInstances、也没有被跟踪会话"的整组杀掉（可用 WAAM_SWEEP_INTERVAL_MS=0 关闭）。
+  startOrphanChromeSweep((accountId) => sessionManager.isSessionTracked(accountId));
+
   // Checker 池自动重连：有授权文件的 checker 静默连回（免扫码；失效则出二维码等扫，不阻塞启动）
   setTimeout(() => {
     import('./services/BaileysScanner').then(async (m) => {
@@ -151,6 +156,7 @@ function gracefulShutdown(reason: string): void {
 
   try { stopWebServer(); } catch (err) { logger.warn('stopWebServer failed:', err); }
   try { cleanupSecurity(); } catch (err) { logger.warn('cleanupSecurity failed:', err); }
+  try { stopOrphanChromeSweep(); } catch { /* ignore */ }
   // 先同步杀掉所有已知 Chrome（不依赖 CDP 往返，最可靠）
   try { closeAllChrome(); } catch (err) { logger.warn('closeAllChrome failed:', err); }
 
