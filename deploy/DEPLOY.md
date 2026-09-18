@@ -305,6 +305,96 @@ systemctl start waam
 
 | 现象 | 原因与处理 |
 |---|---|
+| 构建报 `Failed to load PostCSS config: Unexpected token 'export'` | 已修（见 7 节）。若你改回去了，恢复成 `postcss.config.cjs` |
+| `better-sqlite3` 装不上：`Could not find any Visual Studio installation` / `node-gyp` 失败 | 用 Node 20 构建（Node 22+ 没有对应预编译包）；Linux 上装 `build-essential python3` |
+| 登录接口一直转圈不返回 | stdout 管道断开导致（已修）。老版本可临时用 `WAAM_NO_CONSOLE=1` 规避 |
+| 页面能开、操作一直转圈 | 反向代理没转发 WebSocket `Upgrade` 头 |
+| 账号登录报 `Chrome 调试端点连接超时` | 没装 Chrome，或 root 下缺 `--no-sandbox` |
+| 服务起来就退出 | `journalctl -u waam -n 50`；常见是 `DISPLAY` 缺失或 9527 被占用 |
+| `xvfb-run: 184: 0: not found` | 给 `xvfb-run` 传了 `-s/--server-args`，去掉即可（见 7.1 第 2 条） |
+| `was compiled against a different Node.js version` | better-sqlite3 的 ABI 不对，按 6.3 重建（**先停服务**） |
+| 域名访问 `530 / 1033` | 隧道没连上，见第 9 节 |
+| 公网打不开但本机能 `curl` 通 | 服务商封了端口，走 Cloudflare Tunnel（见 4.1） |
+| 建隧道 API 一直 403 | Account ID 不对。用 `GET /zones/<zone_id>` 里的 `result.account.id`，别凭 token 猜 |
+
+## 9. 掉线（1033）专项：成因、复现与防护
+
+管理员/前端所有功能都依赖「管理器在线」，所以这是本项目的单点。实测复现与结论如下。
+
+### 9.1 `530 + error code: 1033` 到底是什么
+
+Cloudflare 边缘收到了 `guanli.whatspph.com` 的请求，但**没有任何 cloudflared 进程连着这个隧道**。
+注意它跟"反爬"无关 —— 反爬触发时返回的是 `403 访问被拒绝`，而且审计日志里会留 `bot_block`。
+两者可以从现象和日志上区分：
+
+| 现象 | 含义 | 查哪里 |
+|---|---|---|
+| `530 / error code: 1033` | 隧道没连上（进程挂了、网络断、Cloudflare 侧隧道状态异常） | `systemctl is-active cloudflared` |
+| `403 访问被拒绝` | 反爬拦截（UA 命中 bot 规则 / 缺 64 位指纹头） | `/var/lib/waam/logs/audit-*.log` 里的 `bot_block` |
+
+### 9.2 实测复现（演练步骤与结果）
+
+```bash
+# 复现
+systemctl stop cloudflared
+curl -s -o /dev/null -w '%{http_code}\n' https://guanli.whatspph.com/   # -> 530，body 含 1033
+```
+
+演练结果：
+
+| 阶段 | guanli.whatspph.com | guanli2.whatspph.com（备用） |
+|---|---|---|
+| 正常 | 200 | 200 |
+| 停掉主隧道 | **530 / 1033** | **200**（不受影响） |
+| 看门狗跑一次后 | 200（自愈） | 200 |
+
+### 9.3 已经做的四层防护
+
+1. **双隧道冗余**：`cloudflared`（guanli）+ `cloudflared-b`（guanli2）是两条**独立**隧道，
+   任一条断，另一条照常工作。主域名出问题时你可以直接把用户切到 `guanli2.whatspph.com`。
+2. **看门狗自动修复**：`waam-watchdog.timer` 每 5 分钟检查一次
+   （服务状态 / 本机 9527 / 主域名外网 / 备用域名外网），发现异常自动 `systemctl restart`，
+   日志 `/var/log/waam-watchdog.log`。开机后 3 分钟首跑。
+3. **永不放弃拉起**：所有 unit 都设 `StartLimitIntervalSec=0`，避免 systemd 在"短时间崩 5 次"后
+   永久停止拉起（默认行为，无人值守场景致命）。
+4. **开机全自动**：`waam` / `cloudflared` / `cloudflared-b` / `waam-watchdog.timer` 全部 `enabled`，
+   实测 `reboot` 后第 1 次外部探测就 200（恢复 < 60 秒）。
+
+### 9.4 持续监测（区分内外视角）
+
+```bash
+bash deploy/tunnel-monitor.sh guanli.whatspph.com 30 21600   # 服务器侧，6 小时
+```
+
+⚠️ **服务器侧探测有假阴性**：服务器自己去访问域名会绕回自己，可能避开真正故障的路径
+（实测停掉隧道时，服务器侧探测仍返回 200，而外部是 530）。所以：
+
+- **判定"外网到底能不能用"，必须以外部监测为准**（你自己电脑、或 UptimeRobot / Cloudflare
+  Health Checks 之类的第三方探针，探测 `https://guanli.whatspph.com/` 期望 200）。
+- 服务器侧监测适合发现"本机是否健康"。
+
+### 9.5 已知边界（必须知道）
+
+- **服务器关机 = 全部停止**。隧道是服务器主动拨出的，机器断电后 Cloudflare 侧立刻 1033，
+  没有任何本地手段能救。要做到"关机也不掉线"，只能**第二台机器**：
+  再部署一份到另一台服务器 + 各挂一条隧道，用 Cloudflare 负载均衡（Load Balancer）
+  或两个域名切换。需要的话可以按同样脚本再部署一台。
+- **管理器进程内存**：约 250–500MB；每个已登录账号再加一个 Chrome（300–500MB）。
+  4GB 内存机器建议常驻不超过 5–6 个账号，否则 OOM 被杀（表现为服务反复重启，
+  看门狗会不断拉起但会话会掉）。
+- **登录态 7 天过期**，到期需重新登录（token 落盘在 `/var/lib/waam/web-sessions.json`）。
+
+## 10. 前端 H5（验证页）说明
+
+`whatspph.com` / `www.whatspph.com` 指向的 `waam-web.pages.dev` 是**另一个部署**，
+本仓库里没有它的源码（`hotline-dist/` 为空、也没有 `web/` 目录）。它的验证流程依赖
+与管理器通信，因此管理器在线是它的前提条件。
+
+接入它需要先拿到那份源码，然后才能做：验证接口指向、失败降级、错误提示等。
+
+
+| 现象 | 原因与处理 |
+|---|---|
 | 构建报 `Failed to load PostCSS config: Unexpected token 'export'` | 已修（见上表）。若你改回去了，恢复成 `postcss.config.cjs` |
 | `better-sqlite3` 装不上：`Could not find any Visual Studio installation` / `node-gyp` 失败 | 用 Node 20 构建（Node 26 没有对应预编译包）；Linux 上装 `build-essential python3` 即可 |
 | 登录接口一直转圈不返回 | stdout 管道断开导致（已修）。老版本可临时用 `WAAM_NO_CONSOLE=1` 规避，或让服务以文件重定向 stdio 启动 |
