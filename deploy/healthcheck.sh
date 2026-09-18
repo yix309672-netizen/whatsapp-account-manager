@@ -59,12 +59,16 @@ load=$(cut -d' ' -f1 /proc/loadavg)
 chk 0 "内存 $mem, 磁盘 $disk, Chrome 进程 $chrome, load $load"
 
 echo "[7] recent errors (last 200 log lines)"
-# 只统计"运行期"错误：排除部署期/环境类噪音（GPU、dbus、历史上的启动失败）
+# 只统计"运行期"错误：排除已知无害噪音
+#  - viz_main_impl / GPU process：headless 无 GPU，Chromium 正常回退
+#  - bus.cc：容器/无桌面环境连不上 dbus
+#  - Main process exited / Scheduled restart：那是我们主动重启的记录，不是崩溃
+#  - xkbcomp：自己起 Xvfb 时的键盘映射提示，X server 明说 "not fatal"
 errs=$(journalctl -u waam --no-pager -n 200 2>/dev/null \
   | grep -iE 'error|fatal|crash' \
-  | grep -viE 'viz_main_impl|bus.cc|GPU process|Main process exited|Failed with result|Scheduled restart' \
+  | grep -viE 'viz_main_impl|bus.cc|GPU process|Main process exited|Failed with result|Scheduled restart|xkbcomp|not fatal' \
   | wc -l)
-[ "${errs:-0}" -eq 0 ] && chk 0 "运行期错误 0 行（GPU/dbus 噪音已排除）" || chk 1 "运行期错误 $errs 行（需人工看）"
+[ "${errs:-0}" -eq 0 ] && chk 0 "运行期错误 0 行（已知无害噪音已排除）" || chk 1 "运行期错误 $errs 行（需人工看）"
 
 echo "======================================"
 echo " 通过 $ok 项，失败 $bad 项"
