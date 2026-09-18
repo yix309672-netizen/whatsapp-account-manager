@@ -47,14 +47,42 @@ export class WhatsAppSessionManager {
     this.startHealthCheck();
   }
 
+  /**
+   * 构造 whatsapp-web.js 客户端。
+   * 抽成方法是为了支持"初始化失败后换一个全新 client 重试"——
+   * 失败的 client 内部 page 已半死，复用同一个实例重试往往还是失败。
+   */
+  private buildClient(accountId: string, chromeWsEndpoint: string, options?: StartSessionOptions): Client {
+    const headless = options?.headless ?? false;
+    return new Client({
+      authStrategy: new LocalAuth({
+        clientId: accountId,
+        dataPath: this.sessionDataPath
+      }),
+      puppeteer: {
+        browserWSEndpoint: chromeWsEndpoint,
+        headless
+      },
+      deviceName: 'WhatsApp账号安全中心',
+      browserName: 'Chrome',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      pairWithPhoneNumber: options?.phoneNumber
+        ? {
+            phoneNumber: options.phoneNumber,
+            showNotification: true,
+            intervalMs: 180000
+          }
+        : undefined
+    });
+  }
+
   async startSession(accountId: string, chromeWsEndpoint: string, _options?: StartSessionOptions): Promise<Client> {
     if (this.sessions.has(accountId)) {
       const existing = this.sessions.get(accountId)!;
       if (existing.status === 'ready') return existing.client;
       await this.stopSession(accountId);
     }
-
-    const headless = _options?.headless ?? false;
 
     // Web 模式强制清除旧认证数据，确保走配对流程（触发手机通知）
     if (_options?.phoneNumber) {
@@ -70,27 +98,7 @@ export class WhatsAppSessionManager {
       }
     }
 
-    const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: accountId,
-        dataPath: this.sessionDataPath
-      }),
-      puppeteer: {
-        browserWSEndpoint: chromeWsEndpoint,
-        headless
-      },
-      deviceName: 'WhatsApp账号安全中心',
-      browserName: 'Chrome',
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      pairWithPhoneNumber: _options?.phoneNumber
-        ? {
-            phoneNumber: _options.phoneNumber,
-            showNotification: true,
-            intervalMs: 180000
-          }
-        : undefined
-    });
+    let client = this.buildClient(accountId, chromeWsEndpoint, _options);
 
     const sessionInfo: SessionInfo = {
       client,
@@ -110,6 +118,56 @@ export class WhatsAppSessionManager {
       const n = await closeBlankTabs(sessionInfo.chromePort).catch(() => -1);
       if (n === 0) logger.info(`sweepBlankTabs for ${accountId}: already clean (${reason})`);
     };
+
+    this.attachClientHandlers(sessionInfo, sweep);
+
+    // 延时兜底清扫：页面创建有延迟的话，事件时点的清扫可能扑空，5s/15s 后再扫两遍
+    for (const ms of [5000, 15000]) {
+      setTimeout(() => {
+        const s = this.sessions.get(accountId);
+        if (!s || !s.chromePort) return;
+        if (s.status === 'disconnected' || s.status === 'failed') return;
+        closeBlankTabs(s.chromePort)
+          .then((n) => { if (n > 0) logger.info(`delayed sweep for ${accountId} closed ${n} tab(s) after ${ms}ms`); })
+          .catch(() => {});
+      }, ms);
+    }
+
+    // 初始化重试：实测第一次并发拉起 6 个账号时，偶发 wwebjs 内部竞态
+    // （Cannot read properties of null (reading 'info')）导致该账号登录失败。
+    // 失败的 client 内部 page 已半死，所以重试要换一个全新 client —— 实测这件事很关键。
+    const MAX_TRY = 3;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_TRY; attempt++) {
+      try {
+        await client.initialize();
+        this.setupReconnect(accountId, chromeWsEndpoint, _options);
+        return client;
+      } catch (err) {
+        lastErr = err;
+        const msg = (err as Error)?.message || String(err);
+        logger.warn(`Session init failed for ${accountId} (attempt ${attempt}/${MAX_TRY}): ${msg}`);
+        if (attempt === MAX_TRY) break;
+        // 销毁半死的 client，换新实例重来
+        try { await client.destroy(); } catch { /* 已经坏了，忽略 */ }
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        sessionInfo.status = 'initializing';
+        client = this.buildClient(accountId, chromeWsEndpoint, _options);
+        sessionInfo.client = client;
+        this.attachClientHandlers(sessionInfo, sweep);
+      }
+    }
+    sessionInfo.status = 'failed';
+    logger.error(`Session init failed for ${accountId} after ${MAX_TRY} attempts:`, lastErr);
+    throw lastErr;
+  }
+
+  /** 绑定 whatsapp-web.js 事件（重试换 client 后需要重新绑定） */
+  private attachClientHandlers(
+    sessionInfo: SessionInfo,
+    sweep: (reason: string) => Promise<void>
+  ): void {
+    const { client, accountId } = sessionInfo;
 
     client.on('qr', async (qr) => {
       sessionInfo.status = 'qr_pending';
@@ -155,28 +213,6 @@ export class WhatsAppSessionManager {
       this.updateAccountStatus(accountId, 'offline');
       this.emitAccountEvent('account:auth_failure', { accountId, message: msg });
     });
-
-    // 延时兜底清扫：页面创建有延迟的话，事件时点的清扫可能扑空，5s/15s 后再扫两遍
-    for (const ms of [5000, 15000]) {
-      setTimeout(() => {
-        const s = this.sessions.get(accountId);
-        if (!s || !s.chromePort) return;
-        if (s.status === 'disconnected' || s.status === 'failed') return;
-        closeBlankTabs(s.chromePort)
-          .then((n) => { if (n > 0) logger.info(`delayed sweep for ${accountId} closed ${n} tab(s) after ${ms}ms`); })
-          .catch(() => {});
-      }, ms);
-    }
-
-    try {
-      await client.initialize();
-      this.setupReconnect(accountId, chromeWsEndpoint, _options);
-      return client;
-    } catch (err) {
-      sessionInfo.status = 'failed';
-      logger.error(`Session init failed for ${accountId}:`, err);
-      throw err;
-    }
   }
 
   async stopSession(accountId: string): Promise<void> {
