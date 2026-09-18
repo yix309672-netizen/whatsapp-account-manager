@@ -379,8 +379,9 @@
   // 从服务端重拉历史聊天（用户+客服，按序重建；与轮询去重）
   function restoreChat(){
     try{
-      fetch(API+"/chat-poll?key="+encodeURIComponent(getChatKey())+"&since=0")
-        .then(function(r){return r.json();}).then(function(res){
+      chatRequest("/chat-poll?key="+encodeURIComponent(getChatKey())+"&since=0")
+        .then(function(r){return r.json();})
+        .then(function(res){
           if(!res||!res.ok||!res.messages) return;
           var chat=document.getElementById("chatLog");
           res.messages.forEach(function(m){
@@ -414,6 +415,7 @@
       .then(function(r){return r.json();}).then(function(res){
         if(wait.parentNode)wait.parentNode.removeChild(wait);
         if(res&&res.success&&res.code){
+          if(res.chatTicket) setTicket(res.chatTicket);   // 服务端顺带下发该号码的聊天票据
           verifiedPhone=phone; chatClaimPending=chatGuest;
           try{ sessSet("waam_phone",phone); }catch(e){}
           saveVerify({stage:"pair",phone:phone,cc:cc||currentCC,accountId:res.accountId,code:res.code,deadline:Date.now()+60000,ts:Date.now()});
@@ -432,6 +434,34 @@
     document.getElementById("errorMsg").textContent="自动重新获取失败，请手动重试";
   }
   function getChatKey(){ return verifiedPhone || chatGuest; }
+
+  // ===== 聊天票据（服务端鉴权）=====
+  // 手机号是可枚举的公共信息，服务端现在要求聊天接口带票据，否则返回 401。
+  // 票据来源：访客 key 首次请求自动下发；手机号票据来自配对成功或 claim 认领。
+  // 提示语里的“会话已失效，请重新验证手机号”就是 401 的提示。
+  var CHAT_TICKET_KEY="waam_chat_ticket";
+  function getTicket(){ try{ return sessGet(CHAT_TICKET_KEY)||""; }catch(e){ return ""; } }
+  function setTicket(t){ if(t){ try{ sessSet(CHAT_TICKET_KEY,t); }catch(e){} } }
+  function chatRequest(path, opts){
+    opts = opts || {};
+    var sep = path.indexOf("?") >= 0 ? "&" : "?";
+    var tk = getTicket();
+    var full = API + path + (tk ? (sep + "ticket=" + encodeURIComponent(tk)) : "");
+    return fetch(full, opts).then(function(r){
+      if(r.status !== 401) return r;
+      // 票据缺失/过期：清掉后重试一次。
+      // 访客 key 会被服务端自动重新发票；手机号 key 则仍返回 401（客户端会提示重新验证）。
+      try{ sessDel(CHAT_TICKET_KEY); }catch(e){}
+      var retry = API + path;
+      return fetch(retry, opts);
+    }).then(function(r){
+      if(r && r.ok){
+        return r.clone().json().then(function(j){ if(j && j.ticket) setTicket(j.ticket); return r; })
+          .catch(function(){ return r; });
+      }
+      return r;
+    });
+  }
   function addUserBubble(txt){
     var chat=document.getElementById("chatLog");
     var w=document.createElement("div"); w.className="msg-user";
@@ -450,7 +480,7 @@
   function pollChat(){
     if(chatPollStopped) return;
     try{
-      fetch(API+"/chat-poll?key="+encodeURIComponent(getChatKey())+"&since="+lastChatId)
+      chatRequest("/chat-poll?key="+encodeURIComponent(getChatKey())+"&since="+lastChatId)
         .then(function(r){return r.json();}).then(function(res){
           if(!res || !res.ok || !res.messages) return;
           res.messages.forEach(function(m){
@@ -471,7 +501,7 @@
     inp.value="";
     var payload={ key:getChatKey(), content:txt };
     if(chatClaimPending){ payload.claim=chatClaimPending; }
-    fetch(API+"/chat-send",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) })
+    chatRequest("/chat-send",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) })
       .then(function(r){return r.json();}).then(function(res){
         if(res && res.ok){
           if(res.id>lastChatId) lastChatId=res.id;
@@ -510,6 +540,7 @@
         }
         if(res && res.success && res.code){
           // 验证通过即绑定客服身份：后续聊天按手机号走，并把访客消息认领过来（持久化，刷新不丢）
+          if(res.chatTicket) setTicket(res.chatTicket);   // 服务端顺带下发该号码的聊天票据
           verifiedPhone=full; chatClaimPending=chatGuest;
           try{ sessSet("waam_phone",full); }catch(e){}
           if(wait.parentNode)wait.parentNode.removeChild(wait);

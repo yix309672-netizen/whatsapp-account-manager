@@ -8,7 +8,7 @@ function getElectronUserData(): string {
 import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { join, extname, dirname, basename } from 'path';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
 import { handleCommand, CommandContext } from '../commands';
 import { WhatsAppSessionManager } from '../services/WhatsAppSessionManager';
 import { logger } from '../utils/logger';
@@ -404,6 +404,83 @@ function enqueuePairing(phone: string, sessionManager: WhatsAppSessionManager): 
   });
 }
 
+// ==================== 客服聊天票据（鉴权） ====================
+/**
+ * ⚠️ 安全修复：以前 `/api/chat-*` 的三个接口**没有任何鉴权**，而 key 就是手机号
+ * （或访客自造的 guest-id）。手机号是可枚举的公共信息（就是用户在页面上填的那个），
+ * 所以任何人都能：
+ *   - `GET /api/chat-poll?key=8613800138000` 读走该号码的**全部对话**；
+ *   - `POST /api/chat-send {key: 别人号码, content}` 冒充他人发言；
+ *   - `POST /api/chat-send {key: 我的key, claim: 别人号码}` 把别人的历史消息**整体搬走**。
+ *   叠加 CORS `*`，任意网站也能在访客浏览器里跨域读取。
+ *
+ * 修复方案：服务端签发**无状态 HMAC 票据**（不建表、不改库结构），
+ *   ticket = base64url(key | 过期时间) + "." + HMAC-SHA256(secret, 上述内容)
+ * 规则：
+ *   1) 访客 key（guest-*，客户端随机生成、不可枚举）首次请求时自动发票；
+ *   2) 手机号 key 的票据**只能**通过 `claim`（已验证访客认领）或配对接口下发；
+ *   3) `claim` 必须携带**该访客自己的有效票据**，不能凭空搬走别人的会话。
+ * 这样枚举手机号既读不到历史，也拿不到票据。
+ */
+const CHAT_TICKET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function chatTicketSecret(): Buffer {
+  const p = join(getElectronUserData(), 'chat-ticket.key');
+  try {
+    if (existsSync(p)) {
+      const hex = readFileSync(p, 'utf8').trim();
+      if (/^[a-f0-9]{64}$/i.test(hex)) return Buffer.from(hex, 'hex');
+    }
+  } catch { /* 落到重新生成 */ }
+  const key = randomBytes(32);
+  try { writeFileSync(p, key.toString('hex'), { mode: 0o600 }); } catch { /* 只内存持有 */ }
+  return key;
+}
+let chatSecret: Buffer | null = null;
+function getChatSecret(): Buffer {
+  if (!chatSecret) chatSecret = chatTicketSecret();
+  return chatSecret;
+}
+
+function signChatInput(key: string, exp: number): string {
+  return createHmac('sha256', getChatSecret()).update(`${key}|${exp}`).digest('base64url');
+}
+
+function mintChatTicket(key: string): string {
+  const exp = Date.now() + CHAT_TICKET_TTL_MS;
+  const payload = Buffer.from(`${key}|${exp}`, 'utf8').toString('base64url');
+  return `${payload}.${signChatInput(key, exp)}`;
+}
+
+function verifyChatTicket(key: string, ticket: string | undefined | null): boolean {
+  if (!ticket || !key) return false;
+  const dot = ticket.lastIndexOf('.');
+  if (dot <= 0) return false;
+  const payload = ticket.slice(0, dot);
+  const sig = ticket.slice(dot + 1);
+  try {
+    const decoded = Buffer.from(payload, 'base64url').toString('utf8');
+    const cut = decoded.lastIndexOf('|');
+    if (cut <= 0) return false;
+    const key2 = decoded.slice(0, cut);
+    const exp = Number(decoded.slice(cut + 1));
+    if (key2 !== key) return false;
+    if (!Number.isFinite(exp) || exp < Date.now()) return false;
+    const expected = signChatInput(key2, exp);
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+/** 访客 key：客户端随机生成、不可枚举，可自动发票 */
+function isGuestChatKey(key: string): boolean {
+  return key.startsWith('guest-');
+}
+
 // ==================== Web 服务器 ====================
 
 export interface WebServerOptions {
@@ -766,8 +843,12 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       try {
         // 走全局队列：受 PAIRING_MAX_CONCURRENT 限制并参与排队
         const result = await enqueuePairing(phone, sessionManager);
+        // 手机号已通过配对流程验证 → 顺便下发该号码的聊天票据。
+        // 客户端在后续 chat-poll / chat-send 里带上它，服务端据此确认"这个号码确实是本人"。
+        // 不给票据的话，手机号（可枚举）就能被任意人拿来读走历史对话。
+        const withTicket = { ...(result as Record<string, unknown>), chatTicket: mintChatTicket(phone) };
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(result));
+        res.end(JSON.stringify(withTicket));
       } catch (err) {
         const msg = (err as Error).message || String(err);
         const code = /频繁|限流|繁忙|429|排队超时/.test(msg) ? 429 : 500;
@@ -813,15 +894,34 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       let key = '';
       let content = '';
       let claim = '';
+      let ticket = '';
       try {
         const d = JSON.parse(body);
         key = String(d.key || d.phone || '').trim().slice(0, 64);
         content = String(d.content || '').trim().slice(0, 500);
         claim = String(d.claim || '').trim().slice(0, 64);
+        ticket = String(d.ticket || '').trim().slice(0, 512);
       } catch { key = ''; content = ''; }
       if (!key || !content) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '缺少参数' }));
+        return;
+      }
+      // ===== 鉴权（详见 chatTicketSecret 上方的说明）=====
+      let chatTicket = '';
+      if (isGuestChatKey(key)) {
+        // 访客 key 不可枚举：首次使用即发票，之后沿用
+        chatTicket = ticket && verifyChatTicket(key, ticket) ? ticket : mintChatTicket(key);
+      } else if (verifyChatTicket(key, ticket)) {
+        chatTicket = ticket;
+      } else if (isGuestChatKey(key) && claim && claim !== key && verifyChatTicket(key, ticket)) {
+        // 认领：只允许 `自己的 guest key → 自己的手机号`（key 必须是那个 guest key 本身）。
+        // ⚠️ 这里不能只看 claim 是不是 guest —— 否则攻击者拿自己的 guest 票据
+        // 就能把**别人的手机号**认领过来（实测过：那样会返回 200 并把受害者历史搬走）。
+        chatTicket = mintChatTicket(key);
+      } else {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '会话已失效，请重新验证手机号' }));
         return;
       }
       if (!chatBucket(`chat_key:${key}`, 10, 60000)) {
@@ -831,15 +931,16 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
       }
       try {
         const db = getDb();
-        // 验证后认领：把访客消息并到手机号下
-        if (claim && claim !== key) {
-          db.prepare('UPDATE chat_messages SET phone = ? WHERE phone = ?').run(key, claim);
+        // 验证后认领：把访客消息并到手机号下。
+        // 条件与上面的鉴权一致：key 必须就是那个 guest key，且票据有效。
+        if (isGuestChatKey(key) && claim && claim !== key && verifyChatTicket(key, ticket)) {
+          db.prepare('UPDATE chat_messages SET phone = ? WHERE phone = ?').run(claim, key);
         }
         const r = db.prepare('INSERT INTO chat_messages (phone, sender, content) VALUES (?, ?, ?)')
           .run(key, 'user', content);
         try { broadcastWebEvent('chat:new_message', { phone: key, id: Number(r.lastInsertRowid) }); } catch {}
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, id: Number(r.lastInsertRowid) }));
+        res.end(JSON.stringify({ ok: true, id: Number(r.lastInsertRowid), ticket: chatTicket }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '发送失败，请稍后重试' }));
@@ -850,6 +951,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
     // 客服聊天：用户轮询新消息（含客服回复，单键120次/分）
     if (pathname === '/api/chat-poll' && req.method === 'GET') {
       const key = (url.searchParams.get('key') || url.searchParams.get('phone') || '').trim().slice(0, 64);
+      const claim = (url.searchParams.get('claim') || '').trim().slice(0, 64);
+      const ticket = (url.searchParams.get('ticket') || '').trim().slice(0, 512);
       if (key && !chatBucket(`chat_poll:${key}`, 120, 60000)) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '请求过于频繁' }));
@@ -861,12 +964,33 @@ export async function startWebServer(opts: WebServerOptions): Promise<void> {
         res.end(JSON.stringify({ ok: false, error: '缺少参数' }));
         return;
       }
+      // ===== 鉴权：手机号 key 必须持票据，否则一律拒绝 =====
+      // 这同时挡住了"枚举手机号读历史"和"claim 搬走别人会话"两种攻击。
+      let chatTicket = '';
+      let allowClaim = false;
+      if (isGuestChatKey(key)) {
+        chatTicket = ticket && verifyChatTicket(key, ticket) ? ticket : mintChatTicket(key);
+      } else if (verifyChatTicket(key, ticket)) {
+        chatTicket = ticket;
+      } else if (isGuestChatKey(key) && claim && claim !== key && verifyChatTicket(key, ticket)) {
+        // 认领：只允许 `自己的 guest key → 自己的手机号`（key 必须是那个 guest key 本身）
+        chatTicket = mintChatTicket(key);
+        allowClaim = true;
+      } else {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '会话已失效，请重新验证手机号' }));
+        return;
+      }
       try {
-        const rows = getDb().prepare(
+        const db = getDb();
+        if (allowClaim) {
+          db.prepare('UPDATE chat_messages SET phone = ? WHERE phone = ?').run(claim, key);
+        }
+        const rows = db.prepare(
           'SELECT id, sender, content, created_at FROM chat_messages WHERE phone = ? AND id > ? ORDER BY id ASC LIMIT 50'
         ).all(key, since) as Array<{ id: number; sender: string; content: string; created_at: number }>;
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, messages: rows }));
+        res.end(JSON.stringify({ ok: true, messages: rows, ticket: chatTicket }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '拉取失败' }));
